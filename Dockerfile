@@ -1,4 +1,4 @@
-FROM eclipse-temurin:17-jre-jammy
+FROM eclipse-temurin:17-jre-alpine
 RUN mkdir -p /app /data \
     && chmod 0755 /app \
     && chmod 0770 /data \
@@ -14,4 +14,4 @@ EXPOSE 8765
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
     CMD ["/app/healthcheck.sh"]
-ENTRYPOINT ["java", "-XX:MaxRAMPercentage=70", "-jar", "/app/server.jar"]
+ENTRYPOINT ["java", "-XX:+UseSerialGC", "-XX:ActiveProcessorCount=2", "-XX:MaxRAMPercentage=70", "-jar", "/app/server.jar"]
