@@ -2,7 +2,9 @@ param(
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$')]
     [string]$Version,
     [ValidateRange(1024, 65535)]
-    [int]$Port = 18765
+    [int]$Port = 18765,
+    [ValidatePattern('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')]
+    [string]$BindAddress = '10.10.10.38'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +24,7 @@ if (!(Test-Path (Join-Path $root 'target/gxtodo-server.jar'))) {
 }
 
 $tarExe = Join-Path $env:WINDIR 'System32/tar.exe'
-& $tarExe -czf $archive -C $root Dockerfile deploy/db2-deploy.sh target/gxtodo-server.jar
+& $tarExe -czf $archive -C $root Dockerfile deploy/db2-deploy.sh deploy/healthcheck.sh target/gxtodo-server.jar
 if ($LASTEXITCODE -ne 0) {
     throw 'Could not create the DB2 deployment archive.'
 }
@@ -32,7 +34,7 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Could not copy the release archive to DB2.'
 }
 
-$remoteCommand = "set -eu; mkdir -p '$remoteRoot'; test ! -e '$remoteRoot/Dockerfile'; tar -xzf '$remoteArchive' -C '$remoteRoot'; cd '$remoteRoot'; chmod 755 deploy/db2-deploy.sh; ./deploy/db2-deploy.sh '$Version' '$Port'; rm -f '$remoteArchive'"
+$remoteCommand = "set -eu; mkdir -p '$remoteRoot'; tar -xzf '$remoteArchive' -C '$remoteRoot'; cd '$remoteRoot'; chmod 755 deploy/db2-deploy.sh deploy/healthcheck.sh; ./deploy/db2-deploy.sh '$Version' '$Port' '$BindAddress'; rm -f '$remoteArchive'"
 & ssh.exe -F $sshConfig db2 $remoteCommand
 if ($LASTEXITCODE -ne 0) {
     throw 'The DB2 deployment failed. Inspect the container with ssh db2 docker ps -a.'

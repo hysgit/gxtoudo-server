@@ -36,7 +36,7 @@ mvn -B -ntp -DskipTests package
 .\deploy-db2.ps1
 ```
 
-部署后可通过 `ssh db2 docker ps` 查看容器，用 `ssh db2 docker logs --tail 100 gxtudo-server` 查看日志。健康检查地址为 `http://10.10.10.38:18765/health`。此地址供家庭网络访问。移动端公开访问需要配置域名及 HTTPS 反向代理。
+部署后可通过 `ssh db2 docker ps` 查看容器，用 `ssh db2 docker logs --tail 100 gxtudo-server` 查看日志。健康检查地址为 `http://10.10.10.38:18765/health`。容器只绑定 DB2 的家庭网络地址。移动端公开访问需要配置域名及 HTTPS 反向代理。
 
 ## 邮件找回密码
 

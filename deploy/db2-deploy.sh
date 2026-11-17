@@ -3,12 +3,17 @@ set -euo pipefail
 
 release_version="${1:?pass the release version}"
 container_port="${2:-18765}"
+bind_address="${3:-10.10.10.38}"
 if ! [[ "$release_version" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]]; then
   echo "Invalid release version" >&2
   exit 2
 fi
 if ! [[ "$container_port" =~ ^[0-9]{4,5}$ ]] || ((container_port < 1024 || container_port > 65535)); then
   echo "Invalid service port" >&2
+  exit 2
+fi
+if ! [[ "$bind_address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  echo "Invalid IPv4 address" >&2
   exit 2
 fi
 
@@ -32,7 +37,7 @@ fi
 docker run --detach --name "$container" --restart unless-stopped --stop-timeout 30 \
   --label com.gxtudo.managed=java-server \
   --label "com.gxtudo.version=$release" \
-  --publish "0.0.0.0:$container_port:8765" \
+  --publish "$bind_address:$container_port:8765" \
   --volume "$volume:/data" \
   --env GXTODO_DATABASE=/data/gxtodo.sqlite3 \
   --env GXTODO_BIND=0.0.0.0 \
