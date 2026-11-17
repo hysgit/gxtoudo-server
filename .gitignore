@@ -5,3 +5,9 @@ __pycache__/
 *.db
 *.db-*
 .env
+/target/
+/.idea/
+*.iml
+*.log
+*.jks
+*.keystore

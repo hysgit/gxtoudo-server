@@ -1,11 +1,3 @@
-"""SQLite storage shared by login, synchronization and collaboration."""
-
-from contextlib import contextmanager
-import sqlite3
-from pathlib import Path
-
-
-SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
@@ -89,34 +81,3 @@ CREATE TABLE IF NOT EXISTS comments (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS comment_task ON comments(team_id, task_id, id);
-"""
-
-
-class Storage:
-    def __init__(self, path):
-        self.path = Path(path).resolve()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connection() as db:
-            db.execute("PRAGMA journal_mode=WAL")
-            db.executescript(SCHEMA)
-
-    @contextmanager
-    def connection(self):
-        db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON")
-        try:
-            yield db
-        finally:
-            db.close()
-
-    @contextmanager
-    def transaction(self, write=False):
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-            try:
-                yield db
-                db.commit()
-            except BaseException:
-                db.rollback()
-                raise
