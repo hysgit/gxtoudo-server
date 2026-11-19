@@ -16,7 +16,7 @@ import static com.gxtodo.server.Protocol.*;
 
 @Service
 final class SyncService {
-    private static final Set<Integer> PRIVATE = Set.of(49, 77);
+    private static final Set<Integer> PRIVATE = Set.of(49, 50, 77);
     private static final Set<Integer> MEMBER_TARGETS = Set.of(76, 83, 88, 98);
 
     static Map<String, Object> lookup(Connection db, long team, int table, String uid) throws SQLException {
@@ -76,6 +76,7 @@ final class SyncService {
             if (table == 49 && payload.containsKey("attachments")) {
                 MediaStorage.validateAttachments(db, userId, team, uid, payload.get("attachments"));
             }
+            if (table == 50) MediaStorage.validateEntry(db, userId, team, payload);
         }
         payload.remove("entropy");
         long login = id(user, "login_id");

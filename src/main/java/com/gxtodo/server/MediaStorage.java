@@ -80,6 +80,20 @@ final class MediaStorage {
             }
             return account;
         });
+        String clientId = request.getParameter("client_id");
+        String expectedHash = request.getParameter("sha256");
+        if (clientId != null && (!clientId.matches("[a-zA-Z0-9_-]{1,128}")
+                || expectedHash == null || !expectedHash.matches("[a-f0-9]{64}"))) {
+            throw new ApiException(1, "附件标识或校验值无效");
+        }
+        if (clientId != null) {
+            var previous = storage.transaction(false, db -> one(db,
+                    "SELECT m.* FROM media m JOIN media_clients c ON m.id=c.media_id WHERE c.owner=? AND c.client_id=?", user.get("id"), clientId));
+            if (previous != null) {
+                match(previous, team, note, kind, file.getSize(), expectedHash);
+                return map("status", "0", "data", metadata(previous));
+            }
+        }
         String mime;
         try (InputStream input = file.getInputStream()) {
             mime = detect(input.readNBytes(64), kind);
@@ -98,19 +112,57 @@ final class MediaStorage {
         String sha = HexFormat.of().formatHex(hash.digest());
         String savedName = name;
         try {
-            storage.transaction(true, db -> {
+            if (expectedHash != null && !expectedHash.equals(sha)) throw new ApiException(1, "附件校验失败");
+            var saved = storage.transaction(true, db -> {
                 Accounts.authenticate(db, session(request));
                 Collaboration.memberTeam(db, team, id(user, "id"), false);
-                execute(db, "INSERT INTO media VALUES(?,?,?,?,?,?,?,?,?,?,?)", mediaId, id(user, "id"), team,
+                var previous = clientId == null ? null : one(db,
+                        "SELECT m.* FROM media m JOIN media_clients c ON m.id=c.media_id WHERE c.owner=? AND c.client_id=?", user.get("id"), clientId);
+                if (previous != null) {
+                    match(previous, team, note, kind, file.getSize(), sha);
+                    return previous;
+                }
+                execute(db, "INSERT INTO media(id,owner,team_id,note_id,object_key,name,kind,content_type,size,sha256,created_at) "
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?)", mediaId, id(user, "id"), team,
                         note, key, savedName, kind, mime, file.getSize(), sha, timestamp());
-                return null;
+                if (clientId != null) execute(db, "INSERT INTO media_clients VALUES(?,?,?)", user.get("id"), clientId, mediaId);
+                var row = one(db, "SELECT * FROM media WHERE id=?", mediaId);
+                match(row, team, note, kind, file.getSize(), sha);
+                return row;
             });
+            if (!key.equals(text(saved, "object_key"))) client.removeObject(RemoveObjectArgs.builder().bucket(bucket).object(key).build());
+            return map("status", "0", "data", metadata(saved));
         } catch (RuntimeException error) {
             client.removeObject(RemoveObjectArgs.builder().bucket(bucket).object(key).build());
             throw error;
         }
-        return map("status", "0", "data", map("id", mediaId, "name", name, "kind", kind,
-                "content_type", mime, "size", file.getSize(), "sha256", sha));
+    }
+
+    private static Map<String, Object> metadata(Map<String, Object> row) {
+        return map("id", row.get("id"), "name", row.get("name"), "kind", row.get("kind"),
+                "content_type", row.get("content_type"), "size", row.get("size"), "sha256", row.get("sha256"));
+    }
+
+    private static void match(Map<String, Object> row, long team, String note, String kind, long size, String hash) {
+        if (row == null || id(row, "team_id") != team || !note.equals(text(row, "note_id"))
+                || !kind.equals(text(row, "kind")) || id(row, "size") != size || !hash.equals(text(row, "sha256"))) {
+            throw new ApiException(3, "附件标识已用于其他内容");
+        }
+    }
+
+    static void validateEntry(Connection db, long user, long team, Map<String, Object> entry) throws SQLException {
+        String note = string(entry.get("note_id"), 256, true);
+        String kind = string(entry.get("kind"), 16, true);
+        if (!Set.of("text", "image", "audio").contains(kind)) throw new ApiException(1, "消息类型无效");
+        var parent = SyncService.lookup(db, team, 49, note);
+        if (parent != null && (id(parent, "mode") == 3 || id(object(parent.get("data")), "user_id") != user)) {
+            throw new ApiException(3, "无权更改此便签内容");
+        }
+        if (!kind.equals("text")) {
+            String media = string(entry.get("media_id"), 64, true);
+            if (one(db, "SELECT 1 FROM media WHERE id=? AND owner=? AND team_id=? AND note_id=? AND kind=?",
+                    media, user, team, note, kind) == null) throw new ApiException(3, "附件不属于此便签");
+        }
     }
 
     @PostMapping(path = "/api/v7/media/read", consumes = MediaType.APPLICATION_JSON_VALUE)

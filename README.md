@@ -61,9 +61,9 @@ java -jar target/gxtodo-server.jar --spring.main.web-application-type=none
 
 所有接口使用已有的 `user_id`、`login_id`、`token` 会话鉴权，不接受匿名对象地址。
 
-- `POST /api/v7/media/upload`：multipart 字段 `team_id`、`note_id`、`kind=image|audio`、`file` 和会话字段。返回 `data` 中的 `id/name/kind/content_type/size/sha256`。校验文件签名，单文件 100 MB；保存原始文件流，不重新编码。
+- `POST /api/v7/media/upload`：multipart 字段 `team_id`、`note_id`、`kind=image|audio`、`file` 和会话字段。可选字段 `client_id` 和 `sha256` 用于本地队列断线重试，重复上传返回同一对象；去重记录保存在独立的 `media_clients` 表。返回 `data` 中的 `id/name/kind/content_type/size/sha256`。校验文件签名，单文件 100 MB；保存原始文件流，不重新编码。
 - `POST /api/v7/media/read`：JSON 中提交附件 `id` 和会话字段。返回原始文件流，仅附件所有者、且仍有空间权限时可读取；便签删除后拒绝读取。
-- 便签表 49 的 `attachments` 是上述元数据数组编码成的 JSON 字符串，通过原有同步接口持久化。最多 30 个附件；服务端校验附件属于当前账号、空间和便签。旧客户端只修改文字时仍保留已有附件。
+- 便签表 49 使用 `title` 保存独立标题，`conversation_version=1` 表示新版会话。表 50 每条记录是一条独立的文字／图片／语音消息，字段包括 `note_id`、`kind`、`content`、`entry_at`、`media_id`、`client_media_id`、`content_type`、`size`、`sha256`、`duration_ms`。表 49 与 50 都按账号隔离；媒体消息验证附件归属，且独立同步，避免同时新增内容时整篇覆盖。旧表 49 的 `attachments` 字符串仍兼容，保留旧版 30 个附件限制。
 
 支持 JPEG、PNG、GIF、WebP、BMP、TIFF、HEIC、AVIF 图片和 M4A、MP3、WAV、OGG 音频。预览能力由手机系统决定，文件本身按原始字节保存。照片的原始元数据随原图保留。录音默认使用 AAC/M4A。
 
@@ -85,3 +85,5 @@ mvn test
 覆盖并发同步重试、账号隔离、删除墓碑、团队审批、私人便签过滤、评论、密码重置、原图/录音字节一致性、附件归属和旧客户端兼容。测试会在测试数据库中创建账号。
 
 MinIO 源码：[RELEASE.2025-10-15T17-29-55Z](https://github.com/minio/minio/tree/9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a)，原项目许可证为 AGPLv3；构建脚本保留版本和源修订标识。
+
+App 7.4 的“保存”仅写入本机，后台队列稍后调用这些接口。服务端响应只包含逻辑文件标识，不返回手机本地路径。原图和录音在本机与 MinIO 都保留副本。

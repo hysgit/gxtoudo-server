@@ -90,11 +90,12 @@ class ApiIntegrationTest {
         return uploadMedia(session, note, image, "image", "original.png");
     }
 
-    private Map<String, Object> uploadMedia(Map<String, Object> session, String note, byte[] image, String kind, String name) throws Exception {
+    private Map<String, Object> uploadMedia(Map<String, Object> session, String note, byte[] image, String kind, String name, Object... extra) throws Exception {
         String boundary = "gxtodo-" + UUID.randomUUID();
         var body = new java.io.ByteArrayOutputStream();
         var params = map("user_id", session.get("user_id"), "login_id", session.get("login_id"),
                 "token", session.get("token"), "team_id", team(session), "note_id", note, "kind", kind);
+        params.putAll(map(extra));
         for (var entry : params.entrySet()) body.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\""
                 + entry.getKey() + "\"\r\n\r\n" + entry.getValue() + "\r\n").getBytes(StandardCharsets.UTF_8));
         body.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + name + "\"\r\n"
@@ -106,6 +107,48 @@ class ApiIntegrationTest {
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body.toByteArray())).build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode(), response.body());
         return object(response.body());
+    }
+
+    @Test
+    void retryUploadUsesStableClientIdAndConversationMessagesStayPrivate() throws Exception {
+        var owner = create("chat-owner");
+        var other = create("chat-other");
+        String note = "49-chat-" + UUID.randomUUID();
+        String clientId = "media-" + UUID.randomUUID();
+        byte[] png = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jfusAAAAASUVORK5CYII=");
+        String hash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(png));
+        var executor = Executors.newFixedThreadPool(3);
+        Map<String, Object> media;
+        try {
+            var jobs = new ArrayList<Callable<Map<String, Object>>>();
+            for (int i = 0; i < 3; i++) jobs.add(() -> uploadMedia(owner, note, png, "image", "original.png",
+                    "client_id", clientId, "sha256", hash));
+            var results = executor.invokeAll(jobs);
+            media = object(results.get(0).get().get("data"));
+            for (var result : results) {
+                assertEquals("0", result.get().get("status"));
+                assertEquals(media.get("id"), object(result.get().get("data")).get("id"));
+            }
+        } finally { executor.shutdownNow(); }
+        long rows = database.transaction(false, db -> id(Database.one(db,
+                "SELECT COUNT(*) AS n FROM media_clients WHERE owner=? AND client_id=?", owner.get("user_id"), clientId), "n"));
+        assertEquals(1, rows);
+        long now = System.currentTimeMillis();
+        var header = change(49, note, team(owner), id(owner, "user_id"), 1, 0, now,
+                "title", "便签标题", "name", "便签标题", "conversation_version", 1);
+        var entry = change(50, "50-" + UUID.randomUUID(), team(owner), id(owner, "user_id"), 1, 0, now + 1,
+                "note_id", note, "kind", "image", "media_id", media.get("id"), "client_media_id", clientId,
+                "entry_at", now, "sha256", hash, "size", png.length, "content_type", "image/png");
+        var created = call("/sync/do", owner, "POST", "entropy", map(), "_data", List.of(header, entry));
+        assertEquals("0", created.get("status"), created.toString());
+        assertEquals(2, objects(created.get("data")).size());
+        var unauthorized = call("/sync/do", other, "POST", "entropy", map());
+        assertTrue(objects(unauthorized.get("down")).stream().noneMatch(row -> note.equals(object(row.get("data")).get("note_id"))));
+        assertEquals("3", uploadMedia(owner, note, png, "image", "original.png", "client_id", clientId,
+                "sha256", "0".repeat(64)).get("status"));
+        var foreign = change(50, "50-forged-" + UUID.randomUUID(), team(other), id(other, "user_id"), 1, 0, now,
+                "note_id", "49-other", "kind", "image", "media_id", media.get("id"));
+        assertEquals("3", call("/sync/do", other, "POST", "entropy", map(), "_data", List.of(foreign)).get("status"));
     }
 
     @Test

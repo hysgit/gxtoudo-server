@@ -96,3 +96,9 @@ CREATE TABLE IF NOT EXISTS media (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS media_note ON media(owner,team_id,note_id);
+CREATE TABLE IF NOT EXISTS media_clients (
+    owner BIGINT NOT NULL REFERENCES users(id),
+    client_id TEXT NOT NULL,
+    media_id TEXT NOT NULL REFERENCES media(id),
+    PRIMARY KEY(owner,client_id)
+);

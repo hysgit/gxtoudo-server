@@ -27,7 +27,8 @@ final class Protocol {
             .withZone(ZoneOffset.UTC);
     private static final String COMMON = "uid user_id team_id entropy created_at updated_at ";
     static final Map<Integer, Set<String>> TABLES = Map.ofEntries(
-            table(49, "name sequence status attachments"), table(59, "name"),
+            table(49, "name title sequence status attachments conversation_version"),
+            table(50, "note_id kind content media_id client_media_id content_type size sha256 duration_ms entry_at media_name"), table(59, "name"),
             table(69, "name map_type coor_type longitude latitude country province city district"),
             table(76, "task_id schedule_id start_at begin_time check_at cost_time role score status"),
             table(77, "schedule_id task_id alert_time"),
