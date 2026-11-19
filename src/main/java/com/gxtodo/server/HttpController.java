@@ -32,11 +32,13 @@ final class HttpController {
     private final ApiService api;
     private final Accounts accounts;
     private final Database storage;
+    private final MediaStorage media;
 
-    HttpController(ApiService api, Accounts accounts, Database storage) {
+    HttpController(ApiService api, Accounts accounts, Database storage, MediaStorage media) {
         this.api = api;
         this.accounts = accounts;
         this.storage = storage;
+        this.media = media;
     }
 
     @RequestMapping(path = "/api/v7/**", method = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE})
@@ -58,8 +60,9 @@ final class HttpController {
     }
 
     @RequestMapping(path = "/health", method = RequestMethod.GET)
-    ResponseEntity<String> health() {
+    ResponseEntity<String> health() throws Exception {
         storage.transaction(false, db -> Database.one(db, "SELECT 1"));
+        media.health();
         return jsonResponse(map("status", "ok"), 200);
     }
 

@@ -1,15 +1,13 @@
 package com.gxtodo.server;
 
-import org.springframework.beans.factory.annotation.Value;
+import jakarta.annotation.PostConstruct;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import javax.sql.DataSource;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -21,30 +19,22 @@ import java.util.Map;
 
 @Component
 final class Database {
-    private final String url;
+    private final DataSource source;
 
-    Database(@Value("${gxtodo.database}") String file) throws IOException, SQLException {
-        Path path = Path.of(file).toAbsolutePath().normalize();
-        Files.createDirectories(path.getParent());
-        url = "jdbc:sqlite:" + path;
-        try (Connection db = connection(); Statement statement = db.createStatement()) {
-            statement.execute("PRAGMA journal_mode=WAL");
+    Database(DataSource source) {
+        this.source = source;
+    }
+
+    @PostConstruct
+    void initialize() throws IOException, SQLException {
+        try (Connection db = source.getConnection(); Statement statement = db.createStatement()) {
+            db.setAutoCommit(false);
+            statement.execute("SELECT pg_advisory_xact_lock(734192001)");
             String schema = new ClassPathResource("schema.sql").getContentAsString(StandardCharsets.UTF_8);
             for (String sql : schema.split(";")) {
                 if (!sql.isBlank()) statement.execute(sql);
             }
-        }
-    }
-
-    private Connection connection() throws SQLException {
-        Connection db = DriverManager.getConnection(url);
-        try (Statement statement = db.createStatement()) {
-            statement.execute("PRAGMA busy_timeout=15000");
-            statement.execute("PRAGMA foreign_keys=ON");
-            return db;
-        } catch (SQLException error) {
-            db.close();
-            throw error;
+            db.commit();
         }
     }
 
@@ -54,15 +44,21 @@ final class Database {
     }
 
     <T> T transaction(boolean write, Work<T> work) {
-        try (Connection db = connection(); Statement statement = db.createStatement()) {
-            statement.execute(write ? "BEGIN IMMEDIATE" : "BEGIN");
+        try (Connection db = source.getConnection(); Statement statement = db.createStatement()) {
+            db.setAutoCommit(false);
+            db.setReadOnly(!write);
             try {
+                statement.execute("SET LOCAL lock_timeout = '15s'");
+                statement.execute("SET LOCAL statement_timeout = '30s'");
+                // A cursor must never pass a revision belonging to an uncommitted writer.
+                // Preserve the SQLite service's write ordering across all API instances.
+                if (write) statement.execute("SELECT pg_advisory_xact_lock(734192002)");
                 T result = work.run(db);
-                statement.execute("COMMIT");
+                db.commit();
                 return result;
             } catch (SQLException | RuntimeException error) {
                 try {
-                    statement.execute("ROLLBACK");
+                    db.rollback();
                 } catch (SQLException rollback) {
                     error.addSuppressed(rollback);
                 }
@@ -80,8 +76,7 @@ final class Database {
     }
 
     static long insert(Connection db, String sql, Object... args) throws SQLException {
-        execute(db, sql, args);
-        return Protocol.id(one(db, "SELECT last_insert_rowid() AS id"), "id");
+        return Protocol.id(one(db, sql + " RETURNING id", args), "id");
     }
 
     static Map<String, Object> one(Connection db, String sql, Object... args) throws SQLException {

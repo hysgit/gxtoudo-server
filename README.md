@@ -1,66 +1,87 @@
-# 高效Todo 服务端
+# 高效Todo Java 服务端
 
-独立的 Java 17 服务提供账户、增量同步、团队、消息和评论 API，使用 SQLite 保存数据。可直接运行 Spring Boot 应用，也可用 Docker 部署。
+Java 17 / Spring Boot API 使用 PostgreSQL 保存账户、任务、便签文字、同步记录及附件索引，MinIO 私有桶保存图片和录音。App 单独维护于 [gxtoudo-app](https://github.com/hysgit/gxtoudo-app)。
 
-## 启动
+## 本地或 Docker 启动
 
-开发运行需要 JDK 17 和 Maven 3.9。
-
-```sh
-mvn spring-boot:run
-```
-
-`GET /health` 返回 `{"status":"ok"}`。默认端口为 8765。数据库路径使用 `GXTODO_DATABASE` 环境变量指定。SQLite 数据备份应使用 backup API，以包含正在运行实例的事务状态。
-
-## Docker 部署
-
-```sh
-mvn -B -ntp -DskipTests package
-docker build -t gxtodo-server:1.0.0 .
-docker volume create gxtodo-data
-docker run -d --name gxtodo-server --restart unless-stopped --stop-timeout 30 \
-  -p 0.0.0.0:18765:8765 -v gxtodo-data:/data \
-  -e GXTODO_DATABASE=/data/gxtodo.sqlite3 \
-  -e GXTODO_PORT=8765 -e GXTODO_BIND=0.0.0.0 \
-  gxtodo-server:1.0.0
-```
-
-在本机执行 `docker build` 前，先用 `mvn -B -ntp -DskipTests package` 构建 JAR。对外供 iOS 和 Android App 使用时，应将反向代理配置为 HTTPS 域名，并转发到容器服务端口。容器默认以非 root 用户运行。数据库存放在 Docker 卷 `gxtodo-data`，更新镜像时保留该卷。旧版 Docker 没有 `docker compose` 命令，可以直接用上面的 `docker run`。
-
-## 发布到 DB2
-
-从 Windows PowerShell 的仓库根目录运行。脚本按当前 Git 提交生成版本标识，上传 JAR 和 Dockerfile，在 DB2 构建镜像，创建持久化数据卷并启动容器。服务监听 DB2 的 `18765` 端口。
+需要 JDK 17+、Maven 3.9+、Go 1.24+ 和 Docker。MinIO 官方已改为源码发行，本项目从官方固定修订构建，不依赖第三方重打包镜像。
 
 ```powershell
 mvn -B -ntp -DskipTests package
-.\deploy-db2.ps1
+./deploy/build-minio.ps1
+Copy-Item .env.example .env
 ```
 
-部署后可通过 `ssh db2 docker ps` 查看容器，用 `ssh db2 docker logs --tail 100 gxtudo-server` 查看日志。健康检查地址为 `http://10.10.10.38:18765/health`。容器只绑定 DB2 的家庭网络地址。移动端公开访问需要配置域名及 HTTPS 反向代理。
+在 `.env` 为 PostgreSQL 和 MinIO 设置不同的随机密码，再运行：
 
-## 邮件找回密码
+```sh
+docker compose up -d --build
+curl http://127.0.0.1:18765/health
+```
 
-设置 `GXTODO_PUBLIC_ORIGIN`（HTTPS 地址）、`GXTODO_SMTP_HOST`、`GXTODO_SMTP_PORT`、`GXTODO_SMTP_FROM`。需要 SMTP 认证时再配置 `GXTODO_SMTP_USER` 和 `GXTODO_SMTP_PASSWORD`。默认 465 使用 TLS，其他端口使用 STARTTLS。重置链接有效 20 分钟，使用后已登录会话失效。
+PostgreSQL 和 MinIO 没有对外发布端口；API 通过配置的 HTTP 地址访问。配置过 MinIO 后，`/health` 同时检查数据库和对象存储。旧 Docker 18.09 可使用下面的 DB2 发布脚本。
 
-## 接口与源码
+## 发布到 DB2 和迁移现有数据
 
-| 模块 | 作用 |
+```powershell
+mvn -B -ntp -DskipTests package
+./deploy/build-minio.ps1
+./deploy-db2.ps1
+```
+
+脚本在 DB2 使用独立网络 `gxtudo-storage`、PostgreSQL 16 镜像和源码构建的 MinIO。密码首次随机生成到 `/home/hy/deploy/gxtudo-server/storage.env`，权限为 600，后续发布复用。数据库卷为 `gxtudo-postgres-data`，文件卷为 `gxtudo-minio-data`。
+
+首次迁移旧 SQLite 实例时，脚本先启动新 API 检查数据库和 MinIO，再停止旧写入，使用 SQLite backup API 创建一致性快照；备份路径为 `/home/hy/deploy/gxtudo-server/backups/<版本>/gxtodo.sqlite3`。迁移器逐表核对行数和内容 SHA-256，并恢复数据库自增序列。账户、密码哈希、会话令牌哈希、任务 ID、同步游标和删除记录均保留。目标表必须为空，否则拒绝覆盖。
+
+旧容器保留为 `gxtudo-server-rollback-<版本>`，旧卷 `gxtudo-server-data` 保留。发布中途失败会重新启动旧 API，备份和 PostgreSQL 数据保留。迁移成功后再回滚 SQLite 会丢失切换后新增的数据，需先停止新 API 并导出增量，不能直接把旧库当作最新数据。
+
+可手动向**空的目标库**迁移：先配置 `GXTODO_DATABASE_URL`、`GXTODO_DATABASE_USER`、`GXTODO_DATABASE_PASSWORD`、`GXTODO_MIGRATE_SQLITE`（SQLite 备份绝对路径），再执行：
+
+```sh
+java -jar target/gxtodo-server.jar --spring.main.web-application-type=none
+```
+
+成功后程序退出。启动正常 API 前清除 `GXTODO_MIGRATE_SQLITE`。
+
+## 配置
+
+| 环境变量 | 用途 |
 | --- | --- |
-| `HttpController` · `ApiService` | HTTP 路由、v7 接口和请求校验 |
-| `Accounts` | 注册、登录、会话、资料和密码 |
-| `SyncService` | 增量游标、重复投递确认和删除记录 |
-| `Collaboration` | 团队权限、申请审批、消息和评论 |
-| `Database` | SQLite 连接和原子事务 |
-| `Protocol` | 表字段、参数校验和 JSON 序列化 |
+| `GXTODO_DATABASE_URL` | PostgreSQL JDBC URL |
+| `GXTODO_DATABASE_USER` / `GXTODO_DATABASE_PASSWORD` | 数据库凭据 |
+| `GXTODO_MINIO_ENDPOINT` | MinIO 内网 S3 地址 |
+| `GXTODO_MINIO_ACCESS_KEY` / `GXTODO_MINIO_SECRET_KEY` | 私有桶凭据 |
+| `GXTODO_MINIO_BUCKET` | 桶名，默认 `gxtodo-media` |
+| `GXTODO_PORT` / `GXTODO_BIND` | API 监听地址，默认 `0.0.0.0:8765` |
+| `GXTODO_PUBLIC_ORIGIN`、`GXTODO_SMTP_*` | 原有邮件找回密码配置 |
 
-API 前缀为 `/api/v7`，接受 JSON 或表单，支持以 `_method` 表示逻辑 GET 或 PUT。成功响应中的 `status` 为字符串 `"0"`。反向代理访问日志应仅记录路径，因为旧客户端的部分 GET 查询参数包含会话字段。
+写事务以 PostgreSQL 事务级 advisory lock 排序，保留原 SQLite 写入顺序，避免同步游标跨过尚未提交的修订号。读取使用独立连接；连接池上限 12，锁等待 15 秒、单条 SQL 30 秒。MinIO 上传和下载不持有数据库事务。
+
+## 图片与语音接口
+
+所有接口使用已有的 `user_id`、`login_id`、`token` 会话鉴权，不接受匿名对象地址。
+
+- `POST /api/v7/media/upload`：multipart 字段 `team_id`、`note_id`、`kind=image|audio`、`file` 和会话字段。返回 `data` 中的 `id/name/kind/content_type/size/sha256`。校验文件签名，单文件 100 MB；保存原始文件流，不重新编码。
+- `POST /api/v7/media/read`：JSON 中提交附件 `id` 和会话字段。返回原始文件流，仅附件所有者、且仍有空间权限时可读取；便签删除后拒绝读取。
+- 便签表 49 的 `attachments` 是上述元数据数组编码成的 JSON 字符串，通过原有同步接口持久化。最多 30 个附件；服务端校验附件属于当前账号、空间和便签。旧客户端只修改文字时仍保留已有附件。
+
+支持 JPEG、PNG、GIF、WebP、BMP、TIFF、HEIC、AVIF 图片和 M4A、MP3、WAV、OGG 音频。预览能力由手机系统决定，文件本身按原始字节保存。照片的原始元数据随原图保留。录音默认使用 AAC/M4A。
+
+代理需设置 `client_max_body_size 101m`，上传读取超时至少 180 秒。访问日志仅记录 URI 路径，避免旧客户端查询参数中的会话字段进入日志。
+
+## 备份
+
+同时备份 PostgreSQL、MinIO 数据卷和 `storage.env`。只备份数据库不能恢复图片和录音。发布脚本在每次 PostgreSQL 更新前生成 `pg_dump -Fc`；MinIO 卷需单独快照或冷备份。移除便签或附件引用后，对象仍保留在私有存储中，不自动清理，以便备份恢复；删除便签后接口拒绝读取。
 
 ## 测试
 
+集成测试仅连接专用测试实例，默认 PostgreSQL 为 `127.0.0.1:15439/gxtodo_test`，MinIO 为 `127.0.0.1:19019`，测试账号 `gxtodo_test` / `gxtodo_test_local_only`。不得把该账号或端口公开到公网。
+
 ```sh
-mvn verify
+docker compose -f compose.test.yaml up -d --build --wait
+mvn test
 ```
 
-测试使用临时数据库，覆盖并发重试、账号隔离、跨会话删除同步、团队审批、成员权限、私人便签过滤、评论及密码重置。
+覆盖并发同步重试、账号隔离、删除墓碑、团队审批、私人便签过滤、评论、密码重置、原图/录音字节一致性、附件归属和旧客户端兼容。测试会在测试数据库中创建账号。
 
-Flutter App 独立维护于 [gxtoudo-app](https://github.com/hysgit/gxtoudo-app)。App 的 `GXTODO_SERVER` 编译参数或账户设置用于指定本服务地址。
+MinIO 源码：[RELEASE.2025-10-15T17-29-55Z](https://github.com/minio/minio/tree/9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a)，原项目许可证为 AGPLv3；构建脚本保留版本和源修订标识。

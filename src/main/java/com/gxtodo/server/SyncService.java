@@ -73,6 +73,9 @@ final class SyncService {
                 payload.put(field, string(value.toString(), 65536, false));
             }
             payload.putAll(map("uid", uid, "team_id", team, "user_id", owner));
+            if (table == 49 && payload.containsKey("attachments")) {
+                MediaStorage.validateAttachments(db, userId, team, uid, payload.get("attachments"));
+            }
         }
         payload.remove("entropy");
         long login = id(user, "login_id");

@@ -1,0 +1,11 @@
+# Built from the official MinIO source, pinned in build-minio.ps1.
+FROM eclipse-temurin:17-jre-alpine
+RUN mkdir -p /data && chown 10001:10001 /data
+COPY target/minio-linux-amd64 /usr/local/bin/minio
+RUN chmod 0555 /usr/local/bin/minio
+USER 10001:10001
+ENV HOME=/tmp
+VOLUME ["/data"]
+EXPOSE 9000
+ENTRYPOINT ["/usr/local/bin/minio"]
+CMD ["server", "/data", "--address", ":9000", "--console-address", ":9001"]

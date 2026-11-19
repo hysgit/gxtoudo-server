@@ -2,6 +2,7 @@
 .idea
 target/*
 !target/gxtodo-server.jar
+!target/minio-linux-amd64
 data
 .env
 *.sqlite3*

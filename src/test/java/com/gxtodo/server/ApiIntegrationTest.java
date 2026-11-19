@@ -33,12 +33,17 @@ class ApiIntegrationTest {
     @LocalServerPort int port;
     @Autowired Database database;
     @Autowired Accounts accounts;
+    @Autowired javax.sql.DataSource source;
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
     @DynamicPropertySource
     static void databasePath(DynamicPropertyRegistry properties) throws IOException {
-        Path directory = Files.createTempDirectory("gxtodo-java-test-");
-        properties.add("gxtodo.database", () -> directory.resolve("test.sqlite3").toString());
+        properties.add("spring.datasource.url", () -> System.getenv().getOrDefault("GXTODO_TEST_DATABASE_URL", "jdbc:postgresql://127.0.0.1:15439/gxtodo_test"));
+        properties.add("spring.datasource.username", () -> "gxtodo_test");
+        properties.add("spring.datasource.password", () -> "gxtodo_test_local_only");
+        properties.add("gxtodo.minio.endpoint", () -> "http://127.0.0.1:19019");
+        properties.add("gxtodo.minio.access-key", () -> "gxtodo_test");
+        properties.add("gxtodo.minio.secret-key", () -> "gxtodo_test_local_only");
     }
 
     private Map<String, Object> call(String route, Map<String, Object> session, String method, Object... values)
@@ -79,6 +84,94 @@ class ApiIntegrationTest {
         Map<String, Object> payload = map("uid", uid, "team_id", team, "user_id", user);
         payload.putAll(map(values));
         return map("table", table, "mode", mode, "edit_time", edited, "entropy", revision, "data", payload);
+    }
+
+    private Map<String, Object> uploadImage(Map<String, Object> session, String note, byte[] image) throws Exception {
+        return uploadMedia(session, note, image, "image", "original.png");
+    }
+
+    private Map<String, Object> uploadMedia(Map<String, Object> session, String note, byte[] image, String kind, String name) throws Exception {
+        String boundary = "gxtodo-" + UUID.randomUUID();
+        var body = new java.io.ByteArrayOutputStream();
+        var params = map("user_id", session.get("user_id"), "login_id", session.get("login_id"),
+                "token", session.get("token"), "team_id", team(session), "note_id", note, "kind", kind);
+        for (var entry : params.entrySet()) body.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\""
+                + entry.getKey() + "\"\r\n\r\n" + entry.getValue() + "\r\n").getBytes(StandardCharsets.UTF_8));
+        body.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + name + "\"\r\n"
+                + "Content-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        body.write(image);
+        body.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+        var response = client.send(HttpRequest.newBuilder(URI.create(origin() + "/api/v7/media/upload"))
+                .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body.toByteArray())).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode(), response.body());
+        return object(response.body());
+    }
+
+    @Test
+    void audioBytesRemainUnchangedAndOldClientKeepsAttachments() throws Exception {
+        var owner = create("voice-android");
+        String note = "49-voice-" + UUID.randomUUID();
+        var wave = java.nio.ByteBuffer.allocate(48).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        wave.put("RIFF".getBytes(StandardCharsets.US_ASCII)).putInt(40)
+                .put("WAVEfmt ".getBytes(StandardCharsets.US_ASCII)).putInt(16)
+                .putShort((short) 1).putShort((short) 1).putInt(16000).putInt(32000)
+                .putShort((short) 2).putShort((short) 16)
+                .put("data".getBytes(StandardCharsets.US_ASCII)).putInt(4).putInt(0);
+        var uploaded = uploadMedia(owner, note, wave.array(), "audio", "voice.wav");
+        assertEquals("0", uploaded.get("status"), uploaded.toString());
+        var audio = object(uploaded.get("data"));
+        assertEquals("audio/wav", audio.get("content_type"));
+        var create = change(49, note, team(owner), id(owner, "user_id"), 1, 0, System.currentTimeMillis(),
+                "name", "语音", "attachments", json(List.of(audio)));
+        var first = call("/sync/do", owner, "POST", "entropy", map(), "_data", List.of(create));
+        assertEquals("0", first.get("status"), first.toString());
+        long revision = id(objects(first.get("data")).get(0), "entropy");
+        var legacy = change(49, note, team(owner), id(owner, "user_id"), 2, revision, System.currentTimeMillis() + 10,
+                "name", "旧客户端仅修改文字");
+        assertEquals("0", call("/sync/do", owner, "POST", "entropy", map(), "_data", List.of(legacy)).get("status"));
+        var row = database.transaction(false, db -> SyncService.lookup(db, team(owner), 49, note));
+        assertEquals(audio.get("id"), objects(object(row.get("data")).get("attachments")).get(0).get("id"));
+        var credentials = map("user_id", owner.get("user_id"), "login_id", owner.get("login_id"),
+                "token", owner.get("token"), "id", audio.get("id"));
+        var read = client.send(HttpRequest.newBuilder(URI.create(origin() + "/api/v7/media/read"))
+                .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(json(credentials))).build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertArrayEquals(wave.array(), read.body());
+    }
+
+    @Test
+    void originalMediaRoundTripAuthorizationAndAttachmentOwnership() throws Exception {
+        var owner = create("media-ios");
+        var other = create("media-other");
+        String note = "49-" + UUID.randomUUID();
+        byte[] png = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jfusAAAAASUVORK5CYII=");
+        var uploaded = uploadImage(owner, note, png);
+        assertEquals("0", uploaded.get("status"), uploaded.toString());
+        var attachment = object(uploaded.get("data"));
+        assertEquals((long) png.length, id(attachment, "size"));
+        String checksum = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(png));
+        assertEquals(checksum, attachment.get("sha256"));
+        var noteChange = change(49, note, team(owner), id(owner, "user_id"), 1, 0, System.currentTimeMillis(),
+                "name", "图片和语音便签", "attachments", json(List.of(attachment)));
+        var synced = call("/sync/do", owner, "POST", "entropy", map(), "_data", List.of(noteChange));
+        assertEquals("0", synced.get("status"), synced.toString());
+        var credentials = map("user_id", owner.get("user_id"), "login_id", owner.get("login_id"),
+                "token", owner.get("token"), "id", attachment.get("id"));
+        var read = client.send(HttpRequest.newBuilder(URI.create(origin() + "/api/v7/media/read"))
+                .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(json(credentials))).build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, read.statusCode());
+        assertArrayEquals(png, read.body());
+        assertEquals("image/png", read.headers().firstValue("content-type").orElse(""));
+        assertEquals("3", call("/media/read", other, "POST", "id", attachment.get("id")).get("status"));
+        var forged = change(49, "49-forged", team(owner), id(owner, "user_id"), 1, 0, System.currentTimeMillis(),
+                "name", "跨便签盗用", "attachments", json(List.of(attachment)));
+        assertEquals("3", call("/sync/do", owner, "POST", "entropy", map(), "_data", List.of(forged)).get("status"));
+        assertEquals("1", uploadImage(owner, note, "not-an-image".getBytes(StandardCharsets.UTF_8)).get("status"));
+        var tombstone = change(49, note, team(owner), id(owner, "user_id"), 3, 0, System.currentTimeMillis() + 1000);
+        assertEquals("0", call("/sync/do", owner, "POST", "entropy", map(), "_data", List.of(tombstone)).get("status"));
+        assertEquals("3", call("/media/read", owner, "POST", "id", attachment.get("id")).get("status"));
     }
 
     @Test
@@ -197,14 +290,10 @@ class ApiIntegrationTest {
         });
         var session = login(address, "migrated", password, false);
         assertEquals(user, id(session, "user_id"));
-        var fresh = new Database(databaseFile());
+        var fresh = new Database(source);
         assertEquals("旧版账号", fresh.transaction(false, db -> Database.one(db, "SELECT nickname FROM users WHERE id=?", user)).get("nickname"));
         String fingerprint = digest(json(List.of(89, 1, 123456789L, 0, map("name", "迁移任务", "uid", "89-test", "team_id", 1, "user_id", 1))));
         assertEquals("6df75d1ef26ec3be53e14b987ec168b45b405378caaeb7379cce6a6e2770531e", fingerprint);
-    }
-
-    private String databaseFile() {
-        return database.transaction(false, db -> text(Database.one(db, "PRAGMA database_list"), "file"));
     }
 
     @Test

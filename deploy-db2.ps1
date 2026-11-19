@@ -24,7 +24,10 @@ if (!(Test-Path (Join-Path $root 'target/gxtodo-server.jar'))) {
 }
 
 $tarExe = Join-Path $env:WINDIR 'System32/tar.exe'
-& $tarExe -czf $archive -C $root Dockerfile deploy/db2-deploy.sh deploy/healthcheck.sh target/gxtodo-server.jar
+if (!(Test-Path (Join-Path $root 'target/minio-linux-amd64'))) {
+    throw 'Build MinIO first with ./deploy/build-minio.ps1.'
+}
+& $tarExe -czf $archive -C $root Dockerfile .dockerignore deploy/db2-deploy.sh deploy/healthcheck.sh deploy/Dockerfile.minio target/gxtodo-server.jar target/minio-linux-amd64
 if ($LASTEXITCODE -ne 0) {
     throw 'Could not create the DB2 deployment archive.'
 }

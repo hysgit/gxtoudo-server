@@ -27,7 +27,7 @@ final class Collaboration {
     Map<String, Object> teams(Connection db, Map<String, Object> user, Map<String, Object> params) throws SQLException {
         String keyword = string(params.getOrDefault("keyword", ""), 100, false).strip();
         List<Map<String, Object>> rows = keyword.isEmpty() ? Accounts.teams(db, id(user, "id"))
-                : query(db, "SELECT * FROM teams WHERE status=0 AND type!=1 AND (instr(name,?)>0 OR CAST(id AS TEXT)=?) "
+                : query(db, "SELECT * FROM teams WHERE status=0 AND type!=1 AND (strpos(name,?)>0 OR CAST(id AS TEXT)=?) "
                 + "ORDER BY id DESC LIMIT 100", keyword, keyword);
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map<String, Object> row : rows) {
@@ -153,7 +153,7 @@ final class Collaboration {
                     if (id(Accounts.teamData(db, team), "real_size") >= id(team, "total_size")) {
                         throw new ApiException(3, "团队人数已满");
                     }
-                    execute(db, "INSERT OR IGNORE INTO members VALUES(?,?,?)", teamId, recipient, MEMBER);
+                    execute(db, "INSERT INTO members VALUES(?,?,?) ON CONFLICT DO NOTHING", teamId, recipient, MEMBER);
                 }
                 original.put("operate", operation);
                 execute(db, "UPDATE messages SET content=?,seen=1 WHERE id=?", json(original), requestId);

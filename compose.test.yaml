@@ -1,0 +1,23 @@
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: gxtodo_test
+      POSTGRES_USER: gxtodo_test
+      POSTGRES_PASSWORD: gxtodo_test_local_only
+    ports:
+      - 127.0.0.1:15439:5432
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U gxtodo_test -d gxtodo_test]
+      interval: 3s
+      retries: 20
+  minio-test:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.minio
+    environment:
+      MINIO_ROOT_USER: gxtodo_test
+      MINIO_ROOT_PASSWORD: gxtodo_test_local_only
+      MINIO_BROWSER: 'off'
+    ports:
+      - 127.0.0.1:19019:9000
