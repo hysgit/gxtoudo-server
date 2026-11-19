@@ -86,7 +86,7 @@ if [[ "$legacy" == true ]]; then
   # The old writer is stopped. Use SQLite backup API, including WAL, rather than copying a live file.
   docker run --rm -e BACKUP_UID="$(id -u)" -e BACKUP_GID="$(id -g)" \
     -v gxtudo-server-data:/legacy -v "$backup:/backup" python:3.9-slim \
-    python -c "import os,sqlite3; s=sqlite3.connect('file:/legacy/gxtodo.sqlite3?mode=rw',uri=True); s.execute('pragma query_only=on'); d=sqlite3.connect('/backup/gxtodo.sqlite3'); s.backup(d); assert d.execute('pragma integrity_check').fetchone()[0]=='ok'; d.close(); s.close(); os.chmod('/backup/gxtodo.sqlite3',0o600); os.chown('/backup/gxtodo.sqlite3',int(os.environ['BACKUP_UID']),int(os.environ['BACKUP_GID']))"
+    python -c "import os,sqlite3; s=sqlite3.connect('file:/legacy/gxtodo.sqlite3?mode=rw',uri=True); s.execute('pragma query_only=on'); d=sqlite3.connect('/backup/gxtodo.sqlite3'); s.backup(d); assert d.execute('pragma journal_mode=delete').fetchone()[0]=='delete'; assert d.execute('pragma integrity_check').fetchone()[0]=='ok'; d.close(); s.close(); os.chmod('/backup/gxtodo.sqlite3',0o600); os.chown('/backup/gxtodo.sqlite3',int(os.environ['BACKUP_UID']),int(os.environ['BACKUP_GID']))"
   sha256sum "$backup/gxtodo.sqlite3" > "$backup/SHA256SUMS"
   docker run --rm --network gxtudo-storage --env-file "$config" --user 0:0 -v "$backup:/migration:ro" \
     -e GXTODO_MIGRATE_SQLITE=/migration/gxtodo.sqlite3 "$image" --spring.main.web-application-type=none \
