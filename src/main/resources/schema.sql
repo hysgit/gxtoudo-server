@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS media (
     note_id TEXT NOT NULL,
     object_key TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('image','audio')),
+    kind TEXT NOT NULL CHECK (kind IN ('image','audio','file')),
     content_type TEXT NOT NULL,
     size BIGINT NOT NULL CHECK (size > 0),
     sha256 TEXT NOT NULL,
@@ -101,4 +101,10 @@ CREATE TABLE IF NOT EXISTS media_clients (
     client_id TEXT NOT NULL,
     media_id TEXT NOT NULL REFERENCES media(id),
     PRIMARY KEY(owner,client_id)
+);
+ALTER TABLE media DROP CONSTRAINT IF EXISTS media_kind_check;
+ALTER TABLE media ADD CONSTRAINT media_kind_check CHECK (kind IN ('image','audio','file'));
+CREATE TABLE IF NOT EXISTS media_parents (
+    media_id TEXT PRIMARY KEY REFERENCES media(id),
+    parent_table BIGINT NOT NULL CHECK (parent_table IN (49,51))
 );

@@ -152,6 +152,52 @@ class ApiIntegrationTest {
     }
 
     @Test
+    void ledgerFileExactMoneyAndParentIsolation() throws Exception {
+        var owner=create("ledger-files");
+        String bill="51-"+UUID.randomUUID();
+        byte[] bytes="<html>原始收据文件</html>".getBytes(StandardCharsets.UTF_8);
+        var uploaded=uploadMedia(owner,bill,bytes,"file","收据.html","parent_table",51);
+        assertEquals("0",uploaded.get("status"),uploaded.toString());
+        var file=object(uploaded.get("data"));
+        var header=change(51,bill,team(owner),id(owner,"user_id"),1,0,System.currentTimeMillis(),
+                "name","购买资料","date","2026-11-20","type","expense","amount","9007199254740993.010000000000000001",
+                "channel","GooglePay","party","工行卡","location","测试位置","latitude","30.1","longitude","120.2");
+        var attachment=change(52,"52-"+UUID.randomUUID(),team(owner),id(owner,"user_id"),1,0,System.currentTimeMillis(),
+                "note_id",bill,"kind","file","media_id",file.get("id"),"media_name","收据.html");
+        var result=call("/sync/do",owner,"POST","entropy",map(),"_data",List.of(header,attachment));
+        assertEquals("0",result.get("status"),result.toString());
+        var stored=database.transaction(false,db->SyncService.lookup(db,team(owner),51,bill));
+        assertEquals("9007199254740993.010000000000000001",object(stored.get("data")).get("amount"));
+        var credentials=map("user_id",owner.get("user_id"),"login_id",owner.get("login_id"),"token",owner.get("token"),"id",file.get("id"));
+        var read=client.send(HttpRequest.newBuilder(URI.create(origin()+"/api/v7/media/read"))
+                .header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json(credentials))).build(),HttpResponse.BodyHandlers.ofByteArray());
+        assertArrayEquals(bytes,read.body());
+        assertEquals("application/octet-stream",read.headers().firstValue("Content-Type").orElse(""));
+        assertTrue(read.headers().firstValue("Content-Disposition").orElse("").startsWith("attachment;"));
+        var forged=change(49,bill,team(owner),id(owner,"user_id"),1,0,System.currentTimeMillis(),"name","跨类型引用","attachments",json(List.of(file)));
+        assertEquals("3",call("/sync/do",owner,"POST","entropy",map(),"_data",List.of(forged)).get("status"));
+        var removal=change(51,bill,team(owner),id(owner,"user_id"),3,0,System.currentTimeMillis()+1000);
+        assertEquals("0",call("/sync/do",owner,"POST","entropy",map(),"_data",List.of(removal)).get("status"));
+        assertEquals("3",call("/media/read",owner,"POST","id",file.get("id")).get("status"));
+    }
+
+    @Test
+    void ledgerAndOptionsRemainPrivateInsideSharedTeam() throws Exception {
+        var owner=create("ledger-owner");var other=create("ledger-member");
+        long shared=database.transaction(true,db->{
+            long team=Accounts.createTeam(db,id(owner,"user_id"),"共享空间",11,8);
+            Database.execute(db,"INSERT INTO members VALUES(?,?,?)",team,other.get("user_id"),448);return team;
+        });
+        var header=change(51,"51-"+UUID.randomUUID(),shared,id(owner,"user_id"),1,0,System.currentTimeMillis(),
+                "name","私人账单","date","2026-11-20","type","income","amount","0.10","channel","微信","party","微信余额");
+        var option=change(53,"53-"+UUID.randomUUID(),shared,id(owner,"user_id"),1,0,System.currentTimeMillis(),"name","私人支付途径","kind","channel");
+        assertEquals("0",call("/sync/do",owner,"POST","entropy",map(),"_data",List.of(header,option)).get("status"));
+        var download=call("/sync/do",other,"POST","entropy",map());
+        assertEquals("0",download.get("status"));
+        assertTrue(objects(download.get("down")).stream().noneMatch(row->List.of(51L,52L,53L).contains(id(row,"table_id"))));
+    }
+
+    @Test
     void audioBytesRemainUnchangedAndOldClientKeepsAttachments() throws Exception {
         var owner = create("voice-android");
         String note = "49-voice-" + UUID.randomUUID();

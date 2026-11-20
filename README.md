@@ -87,3 +87,13 @@ mvn test
 MinIO 源码：[RELEASE.2025-10-15T17-29-55Z](https://github.com/minio/minio/tree/9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a)，原项目许可证为 AGPLv3；构建脚本保留版本和源修订标识。
 
 App 7.4 的“保存”仅写入本机，后台队列稍后调用这些接口。服务端响应只包含逻辑文件标识，不返回手机本地路径。原图和录音在本机与 MinIO 都保留副本。
+
+## 记账同步（App 7.5+）
+
+表 51 保存账单：`name/date/type/amount/channel/party/remark/location/latitude/longitude`。类型为 `expense/income/transfer`，金额是十进制字符串，最多 30 位整数、18 位小数，以 BigDecimal 校验并原样保存精度。日期是用户本地日历的 YYYY-MM-DD，不做时区换算。
+
+表 52 保存账单附件，结构与便签媒体消息相同，`note_id` 指向账单 UID；表 53 保存动态途径/账户选项，`kind=channel|party`。三张表均按账号隔离，团队其他成员不可读取。客户端首次支持记账时会重拉一次历史同步游标，补回旧客户端跳过的数据。
+
+上传账单附件时传 `parent_table=51`，便签默认 49。新表 `media_parents` 记录附件所属类型，校验、重试、下载和删除检查均使用该类型；同 UID 的便签和账单不能互相盗用附件。普通文件使用 `kind=file`，按二进制原文存储，下载强制 `application/octet-stream` 和 Content-Disposition attachment，不以内联网页形式返回。
+
+月汇总由客户端做精确十进制累计；内转不计入收入和支出。GPS 由手机在用户授权后获取，服务端只保存该账单提交的坐标与地点，不做后台跟踪。

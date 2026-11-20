@@ -68,12 +68,16 @@ final class MediaStorage {
                                @RequestParam("kind") String kind,
                                HttpServletRequest request) throws Exception {
         string(note, 256, true);
-        if (!Set.of("image", "audio").contains(kind)) throw new ApiException(1, "不支持的附件类型");
+        int parentTable=request.getParameter("parent_table")==null?49:(int)number(request.getParameter("parent_table"),49,51);
+        if (!Set.of(49,51).contains(parentTable) || kind.equals("file") && parentTable!=51) {
+            throw new ApiException(1,"附件所属类型无效");
+        }
+        if (!Set.of("image", "audio", "file").contains(kind)) throw new ApiException(1, "不支持的附件类型");
         if (file.isEmpty() || file.getSize() > MAX_SIZE) throw new ApiException(1, "单个附件应为 1 字节至 100 MB");
         Map<String, Object> user = storage.transaction(false, db -> {
             var account = Accounts.authenticate(db, session(request));
             Collaboration.memberTeam(db, team, id(account, "id"), false);
-            var existing = SyncService.lookup(db, team, 49, note);
+            var existing = SyncService.lookup(db, team, parentTable, note);
             if (existing != null && (id(existing, "mode") == 3
                     || id(object(existing.get("data")), "user_id") != id(account, "id"))) {
                 throw new ApiException(3, "无权向此便签上传附件");
@@ -87,10 +91,9 @@ final class MediaStorage {
             throw new ApiException(1, "附件标识或校验值无效");
         }
         if (clientId != null) {
-            var previous = storage.transaction(false, db -> one(db,
-                    "SELECT m.* FROM media m JOIN media_clients c ON m.id=c.media_id WHERE c.owner=? AND c.client_id=?", user.get("id"), clientId));
+            var previous = storage.transaction(false, db -> mediaRow(db,"m.id=(SELECT media_id FROM media_clients WHERE owner=? AND client_id=?)",user.get("id"),clientId));
             if (previous != null) {
-                match(previous, team, note, kind, file.getSize(), expectedHash);
+                match(previous, team, note, kind, file.getSize(), expectedHash, parentTable);
                 return map("status", "0", "data", metadata(previous));
             }
         }
@@ -116,18 +119,18 @@ final class MediaStorage {
             var saved = storage.transaction(true, db -> {
                 Accounts.authenticate(db, session(request));
                 Collaboration.memberTeam(db, team, id(user, "id"), false);
-                var previous = clientId == null ? null : one(db,
-                        "SELECT m.* FROM media m JOIN media_clients c ON m.id=c.media_id WHERE c.owner=? AND c.client_id=?", user.get("id"), clientId);
+                var previous = clientId == null ? null : mediaRow(db,"m.id=(SELECT media_id FROM media_clients WHERE owner=? AND client_id=?)",user.get("id"),clientId);
                 if (previous != null) {
-                    match(previous, team, note, kind, file.getSize(), sha);
+                    match(previous, team, note, kind, file.getSize(), sha, parentTable);
                     return previous;
                 }
                 execute(db, "INSERT INTO media(id,owner,team_id,note_id,object_key,name,kind,content_type,size,sha256,created_at) "
                         + "VALUES(?,?,?,?,?,?,?,?,?,?,?)", mediaId, id(user, "id"), team,
                         note, key, savedName, kind, mime, file.getSize(), sha, timestamp());
                 if (clientId != null) execute(db, "INSERT INTO media_clients VALUES(?,?,?)", user.get("id"), clientId, mediaId);
-                var row = one(db, "SELECT * FROM media WHERE id=?", mediaId);
-                match(row, team, note, kind, file.getSize(), sha);
+                if(parentTable!=49) execute(db,"INSERT INTO media_parents VALUES(?,?)",mediaId,parentTable);
+                var row = mediaRow(db, "m.id=?", mediaId);
+                match(row, team, note, kind, file.getSize(), sha, parentTable);
                 return row;
             });
             if (!key.equals(text(saved, "object_key"))) client.removeObject(RemoveObjectArgs.builder().bucket(bucket).object(key).build());
@@ -143,25 +146,33 @@ final class MediaStorage {
                 "content_type", row.get("content_type"), "size", row.get("size"), "sha256", row.get("sha256"));
     }
 
-    private static void match(Map<String, Object> row, long team, String note, String kind, long size, String hash) {
+    private static void match(Map<String, Object> row, long team, String note, String kind, long size, String hash, int parentTable) {
         if (row == null || id(row, "team_id") != team || !note.equals(text(row, "note_id"))
-                || !kind.equals(text(row, "kind")) || id(row, "size") != size || !hash.equals(text(row, "sha256"))) {
+                || id(row,"parent_table")!=parentTable || !kind.equals(text(row, "kind")) || id(row, "size") != size || !hash.equals(text(row, "sha256"))) {
             throw new ApiException(3, "附件标识已用于其他内容");
         }
     }
 
+    private static Map<String,Object> mediaRow(Connection db,String where,Object... args) throws SQLException {
+        return one(db,"SELECT m.*,COALESCE(p.parent_table,49) AS parent_table FROM media m LEFT JOIN media_parents p ON p.media_id=m.id WHERE "+where,args);
+    }
+
     static void validateEntry(Connection db, long user, long team, Map<String, Object> entry) throws SQLException {
+        validateEntry(db,user,team,entry,49);
+    }
+
+    static void validateEntry(Connection db, long user, long team, Map<String, Object> entry,int parentTable) throws SQLException {
         String note = string(entry.get("note_id"), 256, true);
         String kind = string(entry.get("kind"), 16, true);
-        if (!Set.of("text", "image", "audio").contains(kind)) throw new ApiException(1, "消息类型无效");
-        var parent = SyncService.lookup(db, team, 49, note);
+        if (!(parentTable==49?Set.of("text","image","audio"):Set.of("image","audio","file")).contains(kind)) throw new ApiException(1, "消息类型无效");
+        var parent = SyncService.lookup(db, team, parentTable, note);
         if (parent != null && (id(parent, "mode") == 3 || id(object(parent.get("data")), "user_id") != user)) {
             throw new ApiException(3, "无权更改此便签内容");
         }
         if (!kind.equals("text")) {
             String media = string(entry.get("media_id"), 64, true);
-            if (one(db, "SELECT 1 FROM media WHERE id=? AND owner=? AND team_id=? AND note_id=? AND kind=?",
-                    media, user, team, note, kind) == null) throw new ApiException(3, "附件不属于此便签");
+            var attachment=mediaRow(db,"m.id=? AND m.owner=? AND m.team_id=? AND m.note_id=? AND m.kind=?",media,user,team,note,kind);
+            if (attachment==null || id(attachment,"parent_table")!=parentTable) throw new ApiException(3,"附件不属于此记录");
         }
     }
 
@@ -169,18 +180,21 @@ final class MediaStorage {
     ResponseEntity<InputStreamResource> read(@RequestBody Map<String, Object> params) throws Exception {
         var media = storage.transaction(false, db -> {
             var user = Accounts.authenticate(db, params);
-            var row = one(db, "SELECT * FROM media WHERE id=? AND owner=?", string(params.get("id"), 64, true), user.get("id"));
+            var row = mediaRow(db, "m.id=? AND m.owner=?", string(params.get("id"), 64, true), user.get("id"));
             if (row == null) throw new ApiException(3, "无权访问此附件");
             Collaboration.memberTeam(db, id(row, "team_id"), id(user, "id"), false);
-            var note = SyncService.lookup(db, id(row, "team_id"), 49, text(row, "note_id"));
+            var note = SyncService.lookup(db, id(row, "team_id"), (int)id(row,"parent_table"), text(row, "note_id"));
             if (note != null && id(note, "mode") == 3) throw new ApiException(3, "便签已删除");
             return row;
         });
         ensureBucket();
         var input = client.getObject(GetObjectArgs.builder().bucket(bucket).object(text(media, "object_key")).build());
-        return ResponseEntity.ok().contentType(MediaType.parseMediaType(text(media, "content_type")))
+        var response=ResponseEntity.ok().contentType(MediaType.parseMediaType(text(media, "content_type")))
                 .contentLength(id(media, "size")).header(HttpHeaders.CACHE_CONTROL, "private, no-store")
-                .header("X-Content-Type-Options", "nosniff").body(new InputStreamResource(input));
+                .header("X-Content-Type-Options", "nosniff");
+        if(text(media,"kind").equals("file")) response.header(HttpHeaders.CONTENT_DISPOSITION,
+                org.springframework.http.ContentDisposition.attachment().filename(text(media,"name"),java.nio.charset.StandardCharsets.UTF_8).build().toString());
+        return response.body(new InputStreamResource(input));
     }
 
     static void validateAttachments(Connection db, long user, long team, String note, Object value) throws SQLException {
@@ -189,12 +203,13 @@ final class MediaStorage {
         Set<String> ids = new HashSet<>();
         for (var attachment : attachments) {
             String id = string(attachment.get("id"), 64, true);
-            if (!ids.add(id) || one(db, "SELECT 1 FROM media WHERE id=? AND owner=? AND team_id=? AND note_id=?",
-                    id, user, team, note) == null) throw new ApiException(3, "附件不属于此便签");
+            var row=mediaRow(db,"m.id=? AND m.owner=? AND m.team_id=? AND m.note_id=?",id,user,team,note);
+            if (!ids.add(id) || row==null || id(row,"parent_table")!=49) throw new ApiException(3,"附件不属于此便签");
         }
     }
 
     static String detect(byte[] head, String kind) {
+        if(kind.equals("file")) return "application/octet-stream";
         String raw = new String(head, java.nio.charset.StandardCharsets.ISO_8859_1);
         if (kind.equals("image")) {
             if (head.length >= 3 && (head[0] & 255) == 255 && (head[1] & 255) == 216 && (head[2] & 255) == 255) return "image/jpeg";
