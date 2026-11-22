@@ -68,7 +68,10 @@ def with_profile(folder):
 class Browser:
     def __init__(self, chromium, mobile):
         self.chromium = chromium
-        self.mobile = {**mobile, "viewport": SIZE, "device_scale_factor": 1}
+        self.mobile = {
+            "user_agent": mobile["user_agent"], "viewport": SIZE,
+            "device_scale_factor": 1, "is_mobile": True, "has_touch": True,
+        }
         self.active = None
 
     def close(self):
@@ -167,7 +170,7 @@ class Browser:
                 chromium_sandbox=os.environ.get("GXTODO_CHROME_SANDBOX") == "1",
                 timeout=8000,
             )
-        except Error:
+        except (Error, TypeError):
             lock.close()
             raise
 
