@@ -51,6 +51,15 @@ final class PushSchedule {
         return day.atTime(time).atZone(zone).toEpochSecond();
     }
 
+    static long occurrence(long start, Map<String, Object> repeat, LocalDate day, ZoneId zone) {
+        if (start <= 0 || start > 253402300799L) return 0;
+        var first = Instant.ofEpochSecond(start).atZone(zone);
+        if (day.isBefore(first.toLocalDate()) || !matches(day, first.toLocalDate(), repeat)) return 0;
+        long at = day.equals(first.toLocalDate()) ? start : epoch(day, first.toLocalTime(), zone);
+        long ends = value(repeat, "repeat_end", 0);
+        return ends > 0 && at > ends ? 0 : at;
+    }
+
     private static boolean matches(LocalDate day, LocalDate first, Map<String, Object> repeat) {
         long elapsed = ChronoUnit.DAYS.between(first, day);
         long count = value(repeat, "repeat_count", 0);

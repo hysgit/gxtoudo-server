@@ -18,15 +18,19 @@ final class ApiService {
     private final Collaboration collaboration;
     private final ResetMail mail;
     private final RemotePush push;
+    private final AiAssistant assistant;
+    private final PriceTracker prices;
 
     ApiService(Database storage, Accounts accounts, SyncService sync, Collaboration collaboration, ResetMail mail,
-               RemotePush push) {
+               RemotePush push, AiAssistant assistant, PriceTracker prices) {
         this.storage = storage;
         this.accounts = accounts;
         this.sync = sync;
         this.collaboration = collaboration;
         this.mail = mail;
         this.push = push;
+        this.assistant = assistant;
+        this.prices = prices;
     }
 
     Map<String, Object> dispatch(String route, String method, Map<String, Object> params) {
@@ -38,6 +42,8 @@ final class ApiService {
             return map();
         }
         if (UNCONFIGURED.contains(route)) throw new ApiException(1, "该功能需要在自建实例配置第三方服务");
+        if (method.equals("POST") && Set.of("/price/collect", "/price/observe", "/price/inspect").contains(route))
+            return storage.transaction(true, db -> prices.collector(db, route, params));
         return storage.transaction(!method.equals("GET"), db -> {
             Map<String, Object> user = Accounts.authenticate(db, params);
             switch (route + " " + method) {
@@ -50,6 +56,19 @@ final class ApiService {
                     execute(db, "DELETE FROM reset_codes WHERE user_id=?", user.get("id"));
                     return map();
                 case "/sync/do POST": return sync.synchronize(db, user, params);
+                case "/ai/chat GET": return assistant.list(db, id(user, "id"), params);
+                case "/ai/chat POST": return assistant.submit(db, id(user, "id"), params);
+                case "/price/watch GET": return prices.list(db, id(user, "id"));
+                case "/price/watch POST": return prices.create(db, id(user, "id"), params);
+                case "/price/watch DELETE":
+                    prices.remove(db, id(user, "id"), number(params.get("id"), 1, Long.MAX_VALUE));
+                    return map();
+                case "/price/history GET": return prices.history(db, id(user, "id"), number(params.get("id"), 1, Long.MAX_VALUE));
+                case "/price/collector PUT": return prices.pair(db, id(user, "id"));
+                case "/price/collector DELETE":
+                    execute(db, "DELETE FROM price_collectors WHERE user_id=?", user.get("id"));
+                    execute(db, "UPDATE price_watches SET lease='',lease_until=0 WHERE user_id=?", user.get("id"));
+                    return map();
                 case "/push/device PUT": return push.register(db, user, params);
                 case "/push/device DELETE":
                     execute(db, "DELETE FROM push_devices WHERE login_id=?", user.get("login_id"));

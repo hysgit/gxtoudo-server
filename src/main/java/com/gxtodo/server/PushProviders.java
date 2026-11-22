@@ -121,6 +121,11 @@ final class PushProviders {
     }
 
     Result send(String provider, String device, String tag, String title, long now, long expires) throws Exception {
+        return sendEvent(provider, device, tag, title, "任务提醒", now, expires);
+    }
+
+    Result sendEvent(String provider, String device, String tag, String title, String body, long now, long expires)
+            throws Exception {
         if (provider.startsWith("apns")) {
             String host = provider.equals("apns_sandbox") ? "api.sandbox.push.apple.com" : "api.push.apple.com";
             var response = post(HttpRequest.newBuilder(URI.create("https://" + host + "/3/device/" + device))
@@ -128,14 +133,14 @@ final class PushProviders {
                     .header("apns-topic", TOPIC).header("apns-push-type", "alert")
                     .header("apns-priority", "10").header("apns-expiration", Long.toString(expires))
                     .header("apns-collapse-id", tag).header("Content-Type", "application/json"),
-                    json(map("aps", map("alert", map("title", title, "body", "任务提醒"), "sound", "default"))));
+                    json(map("aps", map("alert", map("title", title, "body", body), "sound", "default"))));
             if (response.statusCode() == 200) return Result.SENT;
             String reason = response.body().isBlank() ? "" : text(object(response.body()), "reason");
             return INVALID_APNS.contains(reason) ? Result.INVALID_TOKEN : Result.RETRY;
         }
         var response = post(HttpRequest.newBuilder(URI.create("https://fcm.googleapis.com/v1/projects/" + fcm.id() + "/messages:send"))
                 .header("authorization", "Bearer " + googleToken(now)).header("Content-Type", "application/json"),
-                json(map("message", map("token", device, "notification", map("title", title, "body", "任务提醒"),
+                json(map("message", map("token", device, "notification", map("title", title, "body", body),
                         "android", map("priority", "high", "ttl", Math.max(0, expires - now) + "s",
                                 "notification", map("channel_id", "task_remote_push", "tag", tag, "sound", "default")),
                         "data", map("task_push_tag", tag)))));

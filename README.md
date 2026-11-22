@@ -105,3 +105,29 @@ App 7.4 的“保存”仅写入本机，后台队列稍后调用这些接口。
 - iOS 使用 APNs 推送密钥。配置 `GXTODO_APNS_KEY_FILE`、`GXTODO_APNS_KEY_ID` 和 `GXTODO_APNS_TEAM_ID`。Apple Developer 的 App ID 需启用 Push Notifications。
 - Android 使用 Firebase Cloud Messaging HTTP v1。配置 `GXTODO_FCM_ACCOUNT_FILE` 为允许发送 FCM 消息的服务账号 JSON，项目须与客户端一致。
 - db2 将 `/home/hy/deploy/gxtudo-server/push-secrets` 只读挂载到容器的 `/run/gxtodo-push`。文件仅允许运行服务的用户读取，在 `storage.env` 填写容器内路径。部署预检会禁用发送任务。
+
+## 启用 AI 对话
+
+配置 `GXTODO_AI_URL` 为兼容 API 的 `/v1` 地址，`GXTODO_AI_MODEL` 为模型名，`GXTODO_AI_REASONING` 为推理档位。把 Key 放入仅服务运行用户可读的文件，`GXTODO_AI_KEY_FILE` 指向容器内该文件。db2 的 `ai-secrets` 会只读挂载到 `/run/gxtudo-ai`。
+
+所有已登录的 Todo 账号使用同一模型配置。会话和查询按当前账号隔离，团队空间也只查询属于该账号的记录。对话读取已同步的任务、账单和便签文字。账单汇总按精确小数计算，默认沿用记账页的统计口径。
+
+## 配对价格采集端
+
+安装 Python 3.10+ 和 Playwright，在一台可持续联网的电脑运行采集端。先在 Todo 的「追踪」添加商品和规格，再从「配对采集端」复制配对码。采集端保存独立浏览器的会话，由用户在平台页面扫码。
+
+```powershell
+python -m pip install playwright
+python -m playwright install chromium
+python deploy/price-collector.py login --profiles "$env:LOCALAPPDATA/gxtodo-collector" --platform jd
+python deploy/price-collector.py login --profiles "$env:LOCALAPPDATA/gxtodo-collector" --platform taobao
+python deploy/price-collector.py inspect --profiles "$env:LOCALAPPDATA/gxtodo-collector"
+```
+
+在平台页面扫码后，按追踪编号建立本机 JSON 规则。每条规则包含与追踪项一致的 `url`、`variant`、`quantity`、`region`。`markers` 对象包含 `account`、`item`、`variant`、`quantity`、`region`、`total_label`，每个页面标记使用 `selector` 和 `text` 两个字段。`amount` 是应付金额的单个可见元素选择器，`details` 说明该价格包含的条件，`discounts` 可指定额外的当期优惠显示。
+
+先用 `run --once` 核验一次，与同账号同规格的手机结果核对。核验通过后，去掉 `--once` 让采集端约每半小时取一次价。已校验的字段缺失或值变化时，保留上次有效价格。降价消息依赖已启用的 APNs 或 FCM。
+
+```powershell
+python deploy/price-collector.py run --profiles "$env:LOCALAPPDATA/gxtodo-collector" --rules "./personal-price-rules.json" --once
+```

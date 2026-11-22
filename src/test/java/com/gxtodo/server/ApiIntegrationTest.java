@@ -33,6 +33,7 @@ class ApiIntegrationTest {
     @LocalServerPort int port;
     @Autowired Database database;
     @Autowired Accounts accounts;
+    @Autowired AiData aiData;
     @Autowired javax.sql.DataSource source;
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
@@ -107,6 +108,145 @@ class ApiIntegrationTest {
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body.toByteArray())).build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode(), response.body());
         return object(response.body());
+    }
+
+    @Test
+    void aiSummariesUsePrivateExactRecordsAndRunToolsOutsideTheHttpRequest() throws Exception {
+        String email = UUID.randomUUID() + "@example.net";
+        var session = login(email, "ai-test", "Example1234", true);
+        var other = create("other-ai-user");
+        long team = team(session), owner = id(session, "user_id"), now = System.currentTimeMillis();
+        var bill = change(51, "ai-test-first", team, owner, 1, 0, now, "name", "早餐", "date", "2026-11-05",
+                "type", "expense", "amount", "9007199254740993.1234", "channel", "微信", "party", "工行卡");
+        var ignored = change(51, "ai-test-ignored", team, owner, 1, 0, now, "name", "外部款项", "date", "2026-11-05",
+                "type", "expense", "amount", "1.25", "channel", "微信", "party", "工行卡", "include_in_totals", 0);
+        assertEquals("0", call("/sync/do", session, "POST", "entropy", map(), "_data", List.of(bill, ignored)).get("status"));
+        var scope = map("from", "2026-11-01", "to", "2026-11-30");
+        assertEquals("9007199254740993.1234",
+                aiData.call(owner, java.time.ZoneId.of("Asia/Shanghai"), "summarize_bills", scope).data().get("expense"));
+        assertEquals("0", aiData.call(id(other, "user_id"), java.time.ZoneId.of("Asia/Shanghai"), "summarize_bills", scope).data().get("expense"));
+        long shared = database.transaction(true, db -> {
+            long space = Accounts.createTeam(db, owner, "AI 隔离测试", 11, 4);
+            Database.execute(db, "INSERT INTO members VALUES(?,?,?)", space, id(other, "user_id"), 448);
+            return space;
+        });
+        assertEquals("0", call("/sync/do", session, "POST", "entropy", map(), "_data",
+                List.of(change(89, "owned-task", shared, owner, 1, 0, now, "name", "甲的任务"),
+                        change(49, "owned-note", shared, owner, 1, 0, now, "name", "甲的便签"))).get("status"));
+        assertEquals("0", call("/sync/do", other, "POST", "entropy", map(), "_data",
+                List.of(change(89, "peer-task", shared, id(other, "user_id"), 1, 0, now, "name", "乙的任务"))).get("status"));
+        var zone = java.time.ZoneId.of("Asia/Shanghai");
+        var own = aiData.call(owner, zone, "query_tasks", map("space_id", shared));
+        var peer = aiData.call(id(other, "user_id"), zone, "query_tasks", map("space_id", shared));
+        assertEquals(List.of("owned-task"), own.refs().stream().map(ref -> ref.get("uid")).toList());
+        assertEquals(List.of("peer-task"), peer.refs().stream().map(ref -> ref.get("uid")).toList());
+        assertTrue(aiData.call(id(other, "user_id"), zone, "query_notes", map("space_id", shared)).refs().isEmpty());
+
+        var model = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        var checked = new java.util.concurrent.atomic.AtomicBoolean();
+        model.createContext("/v1/chat/completions", exchange -> {
+            var request = object(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            var messages = objects(request.get("messages"));
+            var last = messages.get(messages.size()-1);
+            Map<String, Object> answer;
+            if ("tool".equals(text(last, "role"))) {
+                checked.set(text(last, "content").contains("9007199254740993.1234")
+                        && "xhigh".equals(text(request, "reasoning_effort"))
+                        && "gpt-6-luna".equals(text(request, "model")));
+                answer = map("content", "核对完成");
+            } else {
+                answer = map("content", null, "tool_calls", List.of(map("id", "call-1", "type", "function",
+                        "function", map("name", "summarize_bills", "arguments", json(scope)))));
+            }
+            byte[] response = json(map("choices", List.of(map("message", answer)))).getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            try (var output = exchange.getResponseBody()) { output.write(response); }
+        });
+        model.start();
+        Path key = Files.createTempFile("todo-ai-test", ".txt");
+        Files.writeString(key, "mock-provider-key");
+        var env = new org.springframework.mock.env.MockEnvironment()
+                .withProperty("GXTODO_AI_URL", "http://127.0.0.1:" + model.getAddress().getPort() + "/v1")
+                .withProperty("GXTODO_AI_KEY_FILE", key.toString());
+        var assistant = new AiAssistant(database, aiData, env);
+        try {
+            var prompt = map("thread", "ai-test-thread", "request_id", "ai-test-turn", "question", "核对本月支出", "timezone", "Asia/Shanghai");
+            long otherId = id(other, "user_id");
+            var first = database.transaction(true, db -> assistant.submit(db, owner, prompt));
+            assertEquals(first, database.transaction(true, db -> assistant.submit(db, owner, prompt)));
+            assertTrue(objects(database.transaction(false, db -> assistant.list(db, otherId, prompt)).get("data")).isEmpty());
+            var otherTurn = database.transaction(true, db -> assistant.submit(db, otherId, prompt));
+            assertNotEquals(first.get("id"), otherTurn.get("id"));
+            assistant.tick();
+            boolean done = false;
+            for (int attempt = 0; attempt < 40; attempt++) {
+                var status = database.transaction(false, db -> assistant.list(db, owner, prompt));
+                var turn = objects(status.get("data")).get(0);
+                if ("done".equals(text(turn, "state"))) {
+                    assertEquals("核对完成", turn.get("answer"));
+                    assertTrue(text(turn, "refs").contains("ai-test-first"));
+                    done = true;
+                    break;
+                }
+                assertNotEquals("failed", turn.get("state"), text(turn, "error"));
+                Thread.sleep(250);
+            }
+            assertTrue(done && checked.get());
+        } finally {
+            assistant.close();
+            model.stop(0);
+            Files.deleteIfExists(key);
+        }
+    }
+
+    @Test
+    void personalPriceTrackingIsIsolatedAndKeepsOnlyVerifiedObservations() throws Exception {
+        var session = create("price-owner");
+        var other = create("price-other");
+        var created = call("/price/watch", session, "POST", "url", "https://item.jd.com/123456.html?tracking=foo",
+                "name", "验证样品", "variant", "黑色", "quantity", 1, "region", "杭州");
+        long watch = id(created, "id");
+        assertTrue(objects(call("/price/watch", other, "GET").get("data")).isEmpty());
+        var pair = call("/price/collector", session, "PUT");
+        String token = text(pair, "collector_token");
+        for (String amount : List.of("199.99", "189.95")) {
+            var check = call("/price/collect", null, "POST", "collector_token", token, "watches", List.of(map("id", watch)));
+            var lease = object(check.get("data"));
+            assertEquals("https://item.jd.com/123456.html", lease.get("url"));
+            var recorded = call("/price/observe", null, "POST", "collector_token", token, "watch_id", watch,
+                    "lease", lease.get("lease"), "state", "verified", "amount", amount, "details", "测试口径");
+            assertEquals("0", recorded.get("status"));
+            database.transaction(true, db -> {
+                Database.execute(db, "UPDATE price_watches SET next_check=0 WHERE id=?", watch);
+                return null;
+            });
+        }
+        var history = objects(call("/price/history", session, "GET", "id", watch).get("data"));
+        assertEquals("189.9500", history.get(0).get("amount"));
+        assertEquals("199.9900", history.get(0).get("previous"));
+        assertTrue(objects(call("/price/history", other, "GET", "id", watch).get("data")).isEmpty());
+        String device = "ab".repeat(32);
+        assertEquals("0", call("/push/device", session, "PUT",
+                "provider", "apns", "push_token", device, "timezone", "Asia/Shanghai").get("status"));
+        var provider = org.mockito.Mockito.mock(PushProviders.class);
+        org.mockito.Mockito.when(provider.available("apns")).thenReturn(true);
+        org.mockito.Mockito.when(provider.sendEvent(org.mockito.ArgumentMatchers.eq("apns"),
+                org.mockito.ArgumentMatchers.eq(device), org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.eq("验证样品 降价了"),
+                org.mockito.ArgumentMatchers.eq("京东个人应付价 ¥199.99 → ¥189.95"),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(PushProviders.Result.SENT);
+        var alerts = new PriceAlerts(database, provider, new org.springframework.mock.env.MockEnvironment());
+        try {
+            alerts.tick();
+            alerts.tick();
+            org.mockito.Mockito.verify(provider).sendEvent(org.mockito.ArgumentMatchers.eq("apns"),
+                    org.mockito.ArgumentMatchers.eq(device), org.mockito.ArgumentMatchers.anyString(),
+                    org.mockito.ArgumentMatchers.eq("验证样品 降价了"),
+                    org.mockito.ArgumentMatchers.eq("京东个人应付价 ¥199.99 → ¥189.95"),
+                    org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong());
+        } finally { alerts.close(); }
+        assertEquals("0", call("/price/collector", session, "DELETE").get("status"));
+        assertEquals("5", call("/price/inspect", null, "POST", "collector_token", token).get("status"));
     }
 
     @Test
