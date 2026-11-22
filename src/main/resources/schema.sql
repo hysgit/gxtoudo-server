@@ -110,3 +110,27 @@ CREATE TABLE IF NOT EXISTS media_parents (
 );
 ALTER TABLE media_parents DROP CONSTRAINT IF EXISTS media_parents_parent_table_check;
 ALTER TABLE media_parents ADD CONSTRAINT media_parents_parent_table_check CHECK (parent_table IN (49,51,89));
+
+CREATE TABLE IF NOT EXISTS push_devices (
+    login_id BIGINT PRIMARY KEY REFERENCES sessions(id),
+    provider TEXT NOT NULL CHECK (provider IN ('apns','apns_sandbox','fcm')),
+    token TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    UNIQUE (provider, token)
+);
+CREATE TABLE IF NOT EXISTS push_deliveries (
+    login_id BIGINT NOT NULL REFERENCES sessions(id),
+    team_id BIGINT NOT NULL REFERENCES teams(id),
+    task_id TEXT NOT NULL,
+    occurrence BIGINT NOT NULL,
+    remind_at BIGINT NOT NULL,
+    retry_at BIGINT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    finished BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (login_id, team_id, task_id, occurrence, remind_at)
+);
+CREATE INDEX IF NOT EXISTS push_delivery_age ON push_deliveries(remind_at);
+CREATE INDEX IF NOT EXISTS push_alert_owner ON objects(team_id, (data::jsonb->>'user_id'))
+    WHERE table_id=77 AND mode<>3;
+CREATE INDEX IF NOT EXISTS push_task_related ON objects(team_id, table_id, (data::jsonb->>'task_id'))
+    WHERE table_id IN (76,78) AND mode<>3;

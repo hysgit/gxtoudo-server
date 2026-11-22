@@ -97,3 +97,11 @@ App 7.4 的“保存”仅写入本机，后台队列稍后调用这些接口。
 上传账单附件时传 `parent_table=51`，便签默认 49。新表 `media_parents` 记录附件所属类型，校验、重试、下载和删除检查均使用该类型；同 UID 的便签和账单不能互相盗用附件。普通文件使用 `kind=file`，按二进制原文存储，下载强制 `application/octet-stream` 和 Content-Disposition attachment，不以内联网页形式返回。
 
 月汇总由客户端做精确十进制累计；内转不计入收入和支出。GPS 由手机在用户授权后获取，服务端只保存该账单提交的坐标与地点，不做后台跟踪。
+
+## 任务远程推送
+
+服务端每 10 秒检查已同步的任务提醒，过滤已完成、已删除和仅闹钟的任务。已到点的提醒最多在 5 分钟内补发，接收设备必须已登录并注册通知。
+
+- iOS 使用 APNs 推送密钥。配置 `GXTODO_APNS_KEY_FILE`、`GXTODO_APNS_KEY_ID` 和 `GXTODO_APNS_TEAM_ID`。Apple Developer 的 App ID 需启用 Push Notifications。
+- Android 使用 Firebase Cloud Messaging HTTP v1。配置 `GXTODO_FCM_ACCOUNT_FILE` 为允许发送 FCM 消息的服务账号 JSON，项目须与客户端一致。
+- db2 将 `/home/hy/deploy/gxtudo-server/push-secrets` 只读挂载到容器的 `/run/gxtodo-push`。文件仅允许运行服务的用户读取，在 `storage.env` 填写容器内路径。部署预检会禁用发送任务。

@@ -8,6 +8,11 @@ bind="${3:-10.10.10.38}"
 [[ "$bind" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || exit 2
 base=/home/hy/deploy/gxtudo-server
 config="$base/storage.env"
+push_secrets="$base/push-secrets"
+push_mount=()
+if [[ -d "$push_secrets" ]]; then
+  push_mount=(--mount "type=bind,src=$push_secrets,dst=/run/gxtodo-push,readonly")
+fi
 backup="$base/backups/$release"
 image="gxtudo-server:$release"
 rollback="gxtudo-server-rollback-$release"
@@ -59,7 +64,8 @@ if docker inspect gxtudo-server >/dev/null 2>&1; then
   old=true
 fi
 # Validate the new Java process and storage before interrupting the old API.
-docker run -d --name "gxtudo-preflight-$release" --network gxtudo-storage --env-file "$config" "$image" >/dev/null
+docker run -d --name "gxtudo-preflight-$release" --network gxtudo-storage --env-file "$config" \
+  "${push_mount[@]}" -e GXTODO_PUSH_WORKER=false "$image" >/dev/null
 preflight=false
 for attempt in $(seq 1 60); do
   if docker exec "gxtudo-preflight-$release" /app/healthcheck.sh >/dev/null 2>&1; then preflight=true; break; fi
@@ -98,7 +104,7 @@ else
 fi
 docker run -d --name gxtudo-server --restart unless-stopped --stop-timeout 30 \
   --label com.gxtudo.managed=java-server --label "com.gxtudo.version=$release" \
-  --network gxtudo-storage --env-file "$config" -p "$bind:$port:8765" "$image" >/dev/null
+  --network gxtudo-storage --env-file "$config" "${push_mount[@]}" -p "$bind:$port:8765" "$image" >/dev/null
 healthy=false
 for attempt in $(seq 1 60); do
   if docker exec gxtudo-server /app/healthcheck.sh >/dev/null 2>&1; then healthy=true; break; fi

@@ -110,6 +110,51 @@ class ApiIntegrationTest {
     }
 
     @Test
+    void serverPushSendsOnceWithoutClientPollingAndIgnoresCompletedTasks() throws Exception {
+        var session = create("remote-push");
+        long team = team(session), user = id(session, "user_id");
+        long now = java.time.Instant.now().getEpochSecond();
+        long edited = now * 1000;
+        String token = "ab".repeat(32);
+        var device = call("/push/device", session, "PUT", "provider", "apns", "push_token", token, "timezone", "Asia/Shanghai");
+        assertEquals("0", device.get("status"), device.toString());
+        var records = new ArrayList<Map<String, Object>>();
+        for (String key : List.of("due", "done", "alarm", "deleted")) {
+            records.add(change(89, key, team, user, key.equals("deleted") ? 3 : 1, 0, edited, "name", key));
+            records.add(change(79, key + "-schedule", team, user, 1, 0, edited,
+                    "task_id", key, "start_at", now - 1, "is_all_day", 0));
+            records.add(change(77, key + "-alert", team, user, 1, 0, edited,
+                    "task_id", key, "schedule_id", key + "-schedule", "alert_time", 0,
+                    "reminder_mode", key.equals("alarm") ? "alarm" : "both"));
+        }
+        records.add(change(76, "done-check", team, user, 1, 0, edited,
+                "task_id", "done", "start_at", now - 1, "status", 1));
+        assertEquals("0", call("/sync/do", session, "POST", "entropy", map(), "_data", records).get("status"));
+        var provider = org.mockito.Mockito.mock(PushProviders.class);
+        org.mockito.Mockito.when(provider.available("apns")).thenReturn(true);
+        org.mockito.Mockito.when(provider.send(org.mockito.ArgumentMatchers.eq("apns"),
+                org.mockito.ArgumentMatchers.eq(token), org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.eq("due"), org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyLong())).thenReturn(PushProviders.Result.SENT);
+        var sender = new RemotePush(database, provider, new org.springframework.mock.env.MockEnvironment());
+        try {
+            sender.tick();
+            sender.tick();
+            org.mockito.Mockito.verify(provider).send(org.mockito.ArgumentMatchers.eq("apns"),
+                    org.mockito.ArgumentMatchers.eq(token), org.mockito.ArgumentMatchers.anyString(),
+                    org.mockito.ArgumentMatchers.eq("due"), org.mockito.ArgumentMatchers.anyLong(),
+                    org.mockito.ArgumentMatchers.anyLong());
+            assertEquals(1L, database.transaction(false, db -> id(Database.one(db,
+                    "SELECT COUNT(*) AS n FROM push_deliveries WHERE login_id=?", session.get("login_id")), "n")).longValue());
+            assertEquals("0", call("/push/device", session, "DELETE").get("status"));
+            assertNull(database.transaction(false, db -> Database.one(db,
+                    "SELECT 1 FROM push_devices WHERE login_id=?", session.get("login_id"))));
+        } finally {
+            sender.close();
+        }
+    }
+
+    @Test
     void taskFileHistoryAndSoftDeleteRestoreUseTheSameRecord() throws Exception {
         var session = create("record-versions");
         long team = team(session), user = id(session, "user_id");

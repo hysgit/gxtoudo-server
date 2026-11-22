@@ -17,13 +17,16 @@ final class ApiService {
     private final SyncService sync;
     private final Collaboration collaboration;
     private final ResetMail mail;
+    private final RemotePush push;
 
-    ApiService(Database storage, Accounts accounts, SyncService sync, Collaboration collaboration, ResetMail mail) {
+    ApiService(Database storage, Accounts accounts, SyncService sync, Collaboration collaboration, ResetMail mail,
+               RemotePush push) {
         this.storage = storage;
         this.accounts = accounts;
         this.sync = sync;
         this.collaboration = collaboration;
         this.mail = mail;
+        this.push = push;
     }
 
     Map<String, Object> dispatch(String route, String method, Map<String, Object> params) {
@@ -47,6 +50,10 @@ final class ApiService {
                     execute(db, "DELETE FROM reset_codes WHERE user_id=?", user.get("id"));
                     return map();
                 case "/sync/do POST": return sync.synchronize(db, user, params);
+                case "/push/device PUT": return push.register(db, user, params);
+                case "/push/device DELETE":
+                    execute(db, "DELETE FROM push_devices WHERE login_id=?", user.get("login_id"));
+                    return map();
                 case "/team/base GET", "/team/base POST", "/team/base PUT":
                     return collaboration.saveTeam(db, user, params, method);
                 case "/team/prepare GET": return collaboration.prepare(db, user, params);
