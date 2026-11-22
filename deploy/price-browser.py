@@ -14,8 +14,8 @@ from urllib.parse import urlsplit
 from playwright.sync_api import Error, TimeoutError, sync_playwright
 
 LOGIN = {
-    "jd": "https://passport.jd.com/new/login.aspx",
-    "taobao": "https://login.taobao.com/member/login.jhtml",
+    "jd": "https://plogin.m.jd.com/login/login?appid=100&returnurl=https%3A%2F%2Fm.jd.com%2F",
+    "taobao": "https://login.m.taobao.com/login.htm?redirectURL=https%3A%2F%2Fm.taobao.com%2F",
 }
 DOMAINS = {
     "jd": ("jd.com", "jd.hk", "360buyimg.com", "jdpay.com", "jcloudcs.com",
@@ -66,8 +66,9 @@ def with_profile(folder):
 
 
 class Browser:
-    def __init__(self, chromium):
+    def __init__(self, chromium, mobile):
         self.chromium = chromium
+        self.mobile = {**mobile, "viewport": SIZE, "device_scale_factor": 1}
         self.active = None
 
     def close(self):
@@ -120,7 +121,7 @@ class Browser:
             self.close()
             return {}
         if action == "tap":
-            page.mouse.click(data["x"], data["y"])
+            page.touchscreen.tap(data["x"], data["y"])
         elif action == "scroll":
             page.mouse.move(data["x"], data["y"])
             page.mouse.wheel(0, data["dy"])
@@ -161,7 +162,7 @@ class Browser:
         try:
             context = self.chromium.launch_persistent_context(
                 str(profile), executable_path=os.environ.get("CHROMIUM"), headless=True,
-                viewport=SIZE, device_scale_factor=1, accept_downloads=False,
+                **self.mobile, accept_downloads=False,
                 service_workers="block", locale="zh-CN", timezone_id="Asia/Shanghai",
                 chromium_sandbox=os.environ.get("GXTODO_CHROME_SANDBOX") == "1",
                 timeout=8000,
@@ -278,7 +279,7 @@ def main():
         server.token = Path(os.environ["GXTODO_PRICE_BROWSER_TOKEN_FILE"]).read_text().strip()
         if not re.fullmatch(r"[a-f0-9]{64}", server.token):
             raise SystemExit("Price browser secret is invalid")
-        server.browser = Browser(playwright.chromium)
+        server.browser = Browser(playwright.chromium, playwright.devices["Pixel 7"])
         try:
             server.serve_forever()
         finally:
