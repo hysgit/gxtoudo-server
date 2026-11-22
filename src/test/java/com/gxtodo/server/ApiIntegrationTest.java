@@ -110,6 +110,43 @@ class ApiIntegrationTest {
     }
 
     @Test
+    void taskFileHistoryAndSoftDeleteRestoreUseTheSameRecord() throws Exception {
+        var session = create("record-versions");
+        long team = team(session), user = id(session, "user_id");
+        String task = "89-soft-delete";
+        long now = System.currentTimeMillis();
+        var file = uploadMedia(session, task, new byte[]{10, 20, 30}, "file", "sample.pdf", "parent_table", 89);
+        assertEquals("0", file.get("status"), file.toString());
+        String media = text(object(file.get("data")), "id");
+        var create = change(89, task, team, user, 1, 0, now, "name", "含附件的任务");
+        var attachment = change(54, "54-soft-delete", team, user, 1, 0, now + 1,
+                "note_id", task, "kind", "file", "media_id", media, "detached", 0);
+        var history = change(55, "55-soft-delete", team, user, 1, 0, now + 2,
+                "parent_id", task, "action", "保存", "version_at", now + 2, "snapshot", "{\"name\":\"含附件的任务\"}");
+        var saved = call("/sync/do", session, "POST", "entropy", map(), "_data", List.of(create, attachment, history));
+        assertEquals("0", saved.get("status"), saved.toString());
+        long revision = id(objects(saved.get("data")).get(0), "entropy");
+        var deletion = change(89, task, team, user, 3, revision, now + 3);
+        var deleted = call("/sync/do", session, "POST", "entropy", map(), "_data", List.of(deletion));
+        assertEquals("0", deleted.get("status"));
+        long tombstone = id(objects(deleted.get("data")).get(0), "entropy");
+        var row = database.transaction(false, db -> SyncService.lookup(db, team, 89, task));
+        assertEquals("含附件的任务", text(object(row.get("data")), "name"));
+        assertEquals("3", call("/media/read", session, "POST", "id", media).get("status"));
+
+        var stale = change(89, task, team, user, 4, revision, now + 4, "name", "旧版本");
+        var conflict = call("/sync/do", session, "POST", "entropy", map(), "_data", List.of(stale));
+        assertEquals(tombstone, id(objects(conflict.get("data")).get(0), "entropy"));
+        var restore = change(89, task, team, user, 4, tombstone, now + 5);
+        assertEquals("0", call("/sync/do", session, "POST", "entropy", map(), "_data", List.of(restore)).get("status"));
+        row = database.transaction(false, db -> SyncService.lookup(db, team, 89, task));
+        assertEquals(2, id(row, "mode"));
+        assertEquals("含附件的任务", text(object(row.get("data")), "name"));
+        assertNotNull(database.transaction(false, db -> SyncService.lookup(db, team, 54, "54-soft-delete")));
+        assertNotNull(database.transaction(false, db -> SyncService.lookup(db, team, 55, "55-soft-delete")));
+    }
+
+    @Test
     void retryUploadUsesStableClientIdAndConversationMessagesStayPrivate() throws Exception {
         var owner = create("chat-owner");
         var other = create("chat-other");

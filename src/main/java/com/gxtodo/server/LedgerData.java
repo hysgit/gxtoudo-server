@@ -23,6 +23,7 @@ final class LedgerData {
         string(data.get("name"),500,true);
         string(data.get("channel"),100,true);
         string(data.get("party"),100,true);
+        if (data.containsKey("include_in_totals")) number(data.get("include_in_totals"), 0, 1);
         if (text(data,"latitude").isBlank()!=text(data,"longitude").isBlank()) throw new ApiException(1,"定位坐标不完整");
         if (!text(data,"latitude").isBlank()) {
             coordinate(text(data,"latitude"),90); coordinate(text(data,"longitude"),180);

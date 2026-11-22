@@ -106,5 +106,7 @@ ALTER TABLE media DROP CONSTRAINT IF EXISTS media_kind_check;
 ALTER TABLE media ADD CONSTRAINT media_kind_check CHECK (kind IN ('image','audio','file'));
 CREATE TABLE IF NOT EXISTS media_parents (
     media_id TEXT PRIMARY KEY REFERENCES media(id),
-    parent_table BIGINT NOT NULL CHECK (parent_table IN (49,51))
+    parent_table BIGINT NOT NULL CHECK (parent_table IN (49,51,89))
 );
+ALTER TABLE media_parents DROP CONSTRAINT IF EXISTS media_parents_parent_table_check;
+ALTER TABLE media_parents ADD CONSTRAINT media_parents_parent_table_check CHECK (parent_table IN (49,51,89));

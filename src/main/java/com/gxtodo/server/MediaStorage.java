@@ -68,8 +68,8 @@ final class MediaStorage {
                                @RequestParam("kind") String kind,
                                HttpServletRequest request) throws Exception {
         string(note, 256, true);
-        int parentTable=request.getParameter("parent_table")==null?49:(int)number(request.getParameter("parent_table"),49,51);
-        if (!Set.of(49,51).contains(parentTable) || kind.equals("file") && parentTable!=51) {
+        int parentTable=request.getParameter("parent_table")==null?49:(int)number(request.getParameter("parent_table"),49,89);
+        if (!Set.of(49,51,89).contains(parentTable) || kind.equals("file") && parentTable==49) {
             throw new ApiException(1,"附件所属类型无效");
         }
         if (!Set.of("image", "audio", "file").contains(kind)) throw new ApiException(1, "不支持的附件类型");
@@ -78,9 +78,8 @@ final class MediaStorage {
             var account = Accounts.authenticate(db, session(request));
             Collaboration.memberTeam(db, team, id(account, "id"), false);
             var existing = SyncService.lookup(db, team, parentTable, note);
-            if (existing != null && (id(existing, "mode") == 3
-                    || id(object(existing.get("data")), "user_id") != id(account, "id"))) {
-                throw new ApiException(3, "无权向此便签上传附件");
+            if (existing != null && !canAttach(existing, parentTable, id(account, "id"))) {
+                throw new ApiException(3, "无权向此记录上传附件");
             }
             return account;
         });
@@ -119,6 +118,10 @@ final class MediaStorage {
             var saved = storage.transaction(true, db -> {
                 Accounts.authenticate(db, session(request));
                 Collaboration.memberTeam(db, team, id(user, "id"), false);
+                var parent = SyncService.lookup(db, team, parentTable, note);
+                if (parent != null && !canAttach(parent, parentTable, id(user, "id"))) {
+                    throw new ApiException(3, "无权向此记录上传附件");
+                }
                 var previous = clientId == null ? null : mediaRow(db,"m.id=(SELECT media_id FROM media_clients WHERE owner=? AND client_id=?)",user.get("id"),clientId);
                 if (previous != null) {
                     match(previous, team, note, kind, file.getSize(), sha, parentTable);
@@ -166,8 +169,8 @@ final class MediaStorage {
         String kind = string(entry.get("kind"), 16, true);
         if (!(parentTable==49?Set.of("text","image","audio"):Set.of("image","audio","file")).contains(kind)) throw new ApiException(1, "消息类型无效");
         var parent = SyncService.lookup(db, team, parentTable, note);
-        if (parent != null && (id(parent, "mode") == 3 || id(object(parent.get("data")), "user_id") != user)) {
-            throw new ApiException(3, "无权更改此便签内容");
+        if (parent != null && !canAttach(parent, parentTable, user)) {
+            throw new ApiException(3, "无权更改此记录的附件");
         }
         if (!kind.equals("text")) {
             String media = string(entry.get("media_id"), 64, true);
@@ -176,15 +179,27 @@ final class MediaStorage {
         }
     }
 
+    private static boolean canAttach(Map<String, Object> parent, int table, long user) {
+        var data = object(parent.get("data"));
+        if (id(parent, "mode") == 3 && (table == 49 || text(data, "name").isBlank())) return false;
+        return table == 89 || id(data, "user_id") == user;
+    }
+
     @PostMapping(path = "/api/v7/media/read", consumes = MediaType.APPLICATION_JSON_VALUE)
     ResponseEntity<InputStreamResource> read(@RequestBody Map<String, Object> params) throws Exception {
         var media = storage.transaction(false, db -> {
             var user = Accounts.authenticate(db, params);
-            var row = mediaRow(db, "m.id=? AND m.owner=?", string(params.get("id"), 64, true), user.get("id"));
+            var row = mediaRow(db, "m.id=? AND (m.owner=? OR p.parent_table=89)", string(params.get("id"), 64, true), user.get("id"));
             if (row == null) throw new ApiException(3, "无权访问此附件");
             Collaboration.memberTeam(db, id(row, "team_id"), id(user, "id"), false);
             var note = SyncService.lookup(db, id(row, "team_id"), (int)id(row,"parent_table"), text(row, "note_id"));
-            if (note != null && id(note, "mode") == 3) throw new ApiException(3, "便签已删除");
+            if (note != null && id(note, "mode") == 3) throw new ApiException(3, "记录已删除");
+            if (id(row, "owner") != id(user, "id") &&
+                    (note == null || one(db, "SELECT 1 FROM objects WHERE team_id=? AND table_id=54 AND mode<>3 "
+                    + "AND data::jsonb->>'note_id'=? AND data::jsonb->>'media_id'=? AND COALESCE(data::jsonb->>'detached','0')='0'",
+                    id(row, "team_id"), text(row, "note_id"), text(row, "id")) == null)) {
+                throw new ApiException(3, "无权访问此任务附件");
+            }
             return row;
         });
         ensureBucket();

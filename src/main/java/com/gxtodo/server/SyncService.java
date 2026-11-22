@@ -16,7 +16,9 @@ import static com.gxtodo.server.Protocol.*;
 
 @Service
 final class SyncService {
-    private static final Set<Integer> PRIVATE = Set.of(49, 50, 51, 52, 53, 77);
+    private static final Set<Integer> PRIVATE = Set.of(49, 50, 51, 52, 53, 56, 77);
+    private static final Set<Integer> RECOVERABLE = Set.of(51, 89);
+    private static final Set<Integer> VERSIONS = Set.of(55, 56);
     private static final Set<Integer> MEMBER_TARGETS = Set.of(76, 83, 88, 98);
 
     static Map<String, Object> lookup(Connection db, long team, int table, String uid) throws SQLException {
@@ -43,7 +45,8 @@ final class SyncService {
                             Map<String, Object> change) throws SQLException {
         int table = (int) number(change.get("table"), 0, 999);
         if (!TABLES.containsKey(table)) throw new ApiException(1, "未知的同步表");
-        int mode = (int) number(change.get("mode"), 1, 3);
+        int mode = (int) number(change.get("mode"), 1, 4);
+        if (mode == 4 && !RECOVERABLE.contains(table)) throw new ApiException(1, "此记录不能恢复");
         long edited = number(change.get("edit_time"));
         long base = number(change.getOrDefault("entropy", 0));
         Map<String, Object> data = object(change.get("data"));
@@ -54,13 +57,18 @@ final class SyncService {
         Map<String, Object> previous = current == null ? map() : object(current.get("data"));
         long userId = id(user, "id");
         long owner = number(previous.getOrDefault("user_id", data.getOrDefault("user_id", userId)), 1, Long.MAX_VALUE);
+        if (table == 54 && owner != userId && (mode == 3
+                || !text(previous, "media_id").equals(text(data, "media_id"))
+                || !text(previous, "note_id").equals(text(data, "note_id")))) {
+            throw new ApiException(3, "只能调整此任务附件的显示状态");
+        }
         if (PRIVATE.contains(table) && owner != userId) throw new ApiException(3, "无权修改他人的私人数据");
         if (current == null && owner != userId && (!MEMBER_TARGETS.contains(table)
                 || one(db, "SELECT 1 FROM members WHERE team_id=? AND user_id=?", team, owner) == null)) {
             throw new ApiException(3, "无效的数据所有者");
         }
         Map<String, Object> payload = new LinkedHashMap<>(previous);
-        if (mode == 3) {
+        if (mode == 3 && !RECOVERABLE.contains(table)) {
             payload = map("uid", uid, "team_id", team, "user_id", owner);
         } else {
             for (String field : TABLES.get(table)) {
@@ -70,15 +78,34 @@ final class SyncService {
                         || (value instanceof Double d && !Double.isFinite(d))) {
                     throw new ApiException(1, "同步字段格式错误");
                 }
-                payload.put(field, string(value.toString(), 65536, false));
+                if (mode != 3 || current == null || base == id(current, "revision")) {
+                    int maxLength = VERSIONS.contains(table) && field.equals("snapshot") ? 1_000_000 : 65536;
+                    payload.put(field, string(value.toString(), maxLength, false));
+                }
             }
             payload.putAll(map("uid", uid, "team_id", team, "user_id", owner));
+            if (mode == 3) payload.put("deleted_at", edited);
+            else payload.remove("deleted_at");
             if (table == 49 && payload.containsKey("attachments")) {
                 MediaStorage.validateAttachments(db, userId, team, uid, payload.get("attachments"));
             }
             if (table == 50) MediaStorage.validateEntry(db, userId, team, payload);
-            if (table == 51) LedgerData.validate(payload);
+            if (table == 51 && mode != 3) LedgerData.validate(payload);
             if (table == 52) MediaStorage.validateEntry(db, userId, team, payload, 51);
+            if (table == 54) MediaStorage.validateEntry(db, owner, team, payload, 89);
+            if ((table == 52 || table == 54) && payload.containsKey("detached")) {
+                number(payload.get("detached"), 0, 1);
+            }
+            if (table == 77 && payload.containsKey("reminder_mode")
+                    && !Set.of("both", "alarm", "notification").contains(text(payload, "reminder_mode"))) {
+                throw new ApiException(1, "提醒方式无效");
+            }
+            if (VERSIONS.contains(table)) {
+                string(payload.get("parent_id"), 256, true);
+                string(payload.get("action"), 30, true);
+                number(payload.get("version_at"), 1, 253402300799999L);
+                object(payload.get("snapshot"));
+            }
             if (table == 53 && (!Set.of("channel", "party").contains(text(payload,"kind"))
                     || text(payload,"name").isBlank() || text(payload,"name").length()>100)) {
                 throw new ApiException(1, "记账选项无效");
@@ -93,12 +120,14 @@ final class SyncService {
         if (receipt != null) {
             revision = id(receipt, "revision");
             if (current != null && id(current, "revision") != revision) repair = download(current);
-        } else if (current != null && ((base < id(current, "revision") && edited < id(current, "edit_time"))
-                || (id(current, "mode") == 3 && mode != 3))) {
+        } else if (current != null && (VERSIONS.contains(table)
+                || (mode == 4 ? base != id(current, "revision")
+                : (base < id(current, "revision") && edited < id(current, "edit_time"))
+                || (id(current, "mode") == 3 && mode != 3)))) {
             revision = id(current, "revision");
             repair = download(current);
         } else {
-            revision = write(db, team, table, uid, login, edited, mode, payload);
+            revision = write(db, team, table, uid, login, edited, mode == 4 ? 2 : mode, payload);
         }
         if (receipt == null) execute(db, "INSERT INTO receipts VALUES(?,?,?)", login, fingerprint, revision);
         return new Accepted(map("uid", uid, "status", 0, "entropy", revision), repair);
@@ -106,6 +135,7 @@ final class SyncService {
 
     Map<String, Object> synchronize(Connection db, Map<String, Object> user, Map<String, Object> params) throws SQLException {
         Map<String, Object> entropy = object(params.get("entropy"));
+        boolean recordVersions = "1".equals(text(params, "record_versions"));
         List<Map<String, Object>> changes = objects(params.getOrDefault("_data", List.of()));
         if (changes.size() > 10000) throw new ApiException(1, "单次同步记录过多");
         Map<Long, Map<String, Object>> teams = new LinkedHashMap<>();
@@ -144,6 +174,13 @@ final class SyncService {
             offsets.add(map("team_id", team, "entropy", cursor, "remain", rows.size() > limit ? 1 : 0));
         }
         down.putAll(repairs);
+        if (!recordVersions) {
+            for (var update : down.values()) {
+                if (id(update, "table_id") == 52 && "1".equals(text(object(update.get("data")), "detached"))) {
+                    update.put("edit_mode", 3);
+                }
+            }
+        }
         return map("team", teams.keySet().stream().map(id -> map("team_id", id, "status", 0)).toList(),
                 "data", acknowledgments, "down", new ArrayList<>(down.values()), "down_extra", offsets,
                 "sync_tag", text(user, "login_id"));

@@ -29,12 +29,15 @@ final class Protocol {
     static final Map<Integer, Set<String>> TABLES = Map.ofEntries(
             table(49, "name title sequence status attachments conversation_version"),
             table(50, "note_id kind content media_id client_media_id content_type size sha256 duration_ms entry_at media_name"), table(59, "name"),
-            table(51, "name date type amount channel party remark location latitude longitude"),
-            table(52, "note_id kind media_id client_media_id content_type size sha256 duration_ms entry_at media_name parent_table"),
+            table(51, "name date type amount channel party remark location latitude longitude include_in_totals"),
+            table(52, "note_id kind media_id client_media_id content_type size sha256 duration_ms entry_at media_name parent_table detached"),
             table(53, "name kind"),
+            table(54, "note_id kind media_id client_media_id content_type size sha256 duration_ms entry_at media_name parent_table detached"),
+            table(55, "parent_id snapshot version_at action"),
+            table(56, "parent_id snapshot version_at action"),
             table(69, "name map_type coor_type longitude latitude country province city district"),
             table(76, "task_id schedule_id start_at begin_time check_at cost_time role score status"),
-            table(77, "schedule_id task_id alert_time"),
+            table(77, "schedule_id task_id alert_time reminder_mode"),
             table(78, "schedule_id task_id status repeat_start repeat_end repeat_count repeat_start_day "
                     + "day_interval repeat_start_week week_interval repeat_start_month month_interval "
                     + "repeat_start_year year_interval month day week weekday"),
