@@ -73,6 +73,10 @@ final class SyncService {
         } else {
             for (String field : TABLES.get(table)) {
                 if (!data.containsKey(field)) continue;
+                if (current != null && (table == 52 || table == 54)
+                        && !Set.of("detached", "updated_at").contains(field)) {
+                    continue;
+                }
                 Object value = data.get(field);
                 if (!(value instanceof String || value instanceof Number)
                         || (value instanceof Double d && !Double.isFinite(d))) {
