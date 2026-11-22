@@ -18,6 +18,13 @@ ai_mount=()
 if [[ -d "$ai_secrets" ]]; then
   ai_mount=(--mount "type=bind,src=$ai_secrets,dst=/run/gxtodo-ai,readonly")
 fi
+price_secrets="$base/price-browser-secrets"
+price_mount=()
+price_network=""
+if [[ -d "$price_secrets" ]] && docker network inspect gxtudo-price >/dev/null 2>&1; then
+  price_mount=(--mount "type=bind,src=$price_secrets,dst=/run/gxtodo-price,readonly")
+  price_network=gxtudo-price
+fi
 backup="$base/backups/$release"
 image="gxtudo-server:$release"
 rollback="gxtudo-server-rollback-$release"
@@ -70,7 +77,9 @@ if docker inspect gxtudo-server >/dev/null 2>&1; then
 fi
 # Validate the new Java process and storage before interrupting the old API.
 docker run -d --name "gxtudo-preflight-$release" --network gxtudo-storage --env-file "$config" \
-  "${push_mount[@]}" "${ai_mount[@]}" -e GXTODO_PUSH_WORKER=false -e GXTODO_AI_WORKER=false "$image" >/dev/null
+  "${push_mount[@]}" "${ai_mount[@]}" "${price_mount[@]}" \
+  -e GXTODO_PUSH_WORKER=false -e GXTODO_AI_WORKER=false "$image" >/dev/null
+if [[ -n "$price_network" ]]; then docker network connect "$price_network" "gxtudo-preflight-$release"; fi
 preflight=false
 for attempt in $(seq 1 60); do
   if docker exec "gxtudo-preflight-$release" /app/healthcheck.sh >/dev/null 2>&1; then preflight=true; break; fi
@@ -109,7 +118,9 @@ else
 fi
 docker run -d --name gxtudo-server --restart unless-stopped --stop-timeout 30 \
   --label com.gxtudo.managed=java-server --label "com.gxtudo.version=$release" \
-  --network gxtudo-storage --env-file "$config" "${push_mount[@]}" "${ai_mount[@]}" -p "$bind:$port:8765" "$image" >/dev/null
+  --network gxtudo-storage --env-file "$config" "${push_mount[@]}" "${ai_mount[@]}" "${price_mount[@]}" \
+  -p "$bind:$port:8765" "$image" >/dev/null
+if [[ -n "$price_network" ]]; then docker network connect "$price_network" gxtudo-server; fi
 healthy=false
 for attempt in $(seq 1 60); do
   if docker exec gxtudo-server /app/healthcheck.sh >/dev/null 2>&1; then healthy=true; break; fi

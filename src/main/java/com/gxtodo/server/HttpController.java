@@ -56,6 +56,10 @@ final class HttpController {
         }
         Map<String, Object> result = map("status", "0");
         result.putAll(api.dispatch(route, method, params));
+        if (route.equals("/price/login")) {
+            return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
+                    .header(HttpHeaders.CACHE_CONTROL, "no-store").body(json(result));
+        }
         return jsonResponse(result, 200);
     }
 
@@ -96,7 +100,7 @@ final class HttpController {
         if (route.equals("/intro/m-detail.php")) route = DOCUMENTS.getOrDefault(text(params(request), "type"), "/intro/m-help.php");
         return switch (route) {
             case "/agreement" -> page("使用协议", "<p>这是高效Todo自建服务。请使用你获授权的实例，并妥善保管账号。</p>", 200);
-            case "/privacy" -> page("隐私政策", "<p>实例保存账号、任务、便签、账单及其图片、语音和文件用于同步。你授权提供的账单地点与坐标随该条账单保存。任务等协作内容按空间权限访问，便签和记账按所属账号隔离。定位仅在新增账单或手动刷新时请求，拒绝定位仍可保存。上传文件保留原始内容与元数据。启用远程推送时，实例保存设备推送标识和时区，向设备的 Apple 或 Google 推送服务提交提醒内容和设备推送标识。使用 AI 对话时，问题、相关记录片段和计算结果会发送到已配置的模型服务。商品追踪保存商品、地区和价格记录，电商登录会话保存在你运行采集端的电脑。</p>"
+            case "/privacy" -> page("隐私政策", "<p>实例保存账号、任务、便签、账单及其图片、语音和文件用于同步。你授权提供的账单地点与坐标随该条账单保存。任务等协作内容按空间权限访问，便签和记账按所属账号隔离。定位仅在新增账单或手动刷新时请求，拒绝定位仍可保存。上传文件保留原始内容与元数据。启用远程推送时，实例保存设备推送标识和时区，向设备的 Apple 或 Google 推送服务提交提醒内容和设备推送标识。使用 AI 对话时，问题、相关记录片段和计算结果会发送到已配置的模型服务。商品追踪保存商品、地区和价格。使用 App 内平台登录时，页面操作转发至本实例的浏览器，再由官方网页处理。登录会话按 Todo 账号、平台保存在浏览器持久卷中。输入的密码、验证码不会写入 Todo 数据库或访问日志。</p>"
                     + "可在账户设置注销账号。备份和数据保留由实例管理员负责。</p>", 200);
             case "/minor_privacy" -> page("未成年人隐私说明", "<p>未成年人应在监护人同意和指导下使用本服务。</p>", 200);
             default -> page("使用帮助", "<p>在空间菜单管理个人空间或团队。登录后点击同步，在其他设备登录同一账号即可查看已同步数据。</p>", 200);

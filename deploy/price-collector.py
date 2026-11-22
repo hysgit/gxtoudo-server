@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
@@ -15,6 +16,18 @@ LOGIN = {"jd": "https://passport.jd.com/new/login.aspx",
          "taobao": "https://login.taobao.com/member/login.jhtml"}
 HOSTS = {"jd": {"item.jd.com", "item.m.jd.com"},
          "taobao": {"item.taobao.com", "detail.tmall.com"}}
+
+
+@contextmanager
+def profile_lock(folder):
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name == "nt":
+        yield
+        return
+    import fcntl
+    with (folder / ".gxtodo.lock").open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -114,11 +127,16 @@ def main():
             parser.error("登录时请选择 --platform jd 或 taobao")
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(str(profiles / args.platform), headless=False)
-            page = context.pages[0] if context.pages else context.new_page()
-            page.goto(LOGIN[args.platform], wait_until="domcontentloaded")
-            input("请在平台页面扫码登录并确认成功，再回到这里按 Enter：")
-            context.close()
+            folder = profiles / args.platform
+            with profile_lock(folder):
+                context = p.chromium.launch_persistent_context(str(folder), headless=False,
+                                                               executable_path=os.environ.get("CHROMIUM"))
+                try:
+                    page = context.pages[0] if context.pages else context.new_page()
+                    page.goto(LOGIN[args.platform], wait_until="domcontentloaded")
+                    input("请在平台页面登录并确认成功，再回到这里按 Enter：")
+                finally:
+                    context.close()
         return
     token = os.environ.get("GXTODO_COLLECTOR_TOKEN") or getpass.getpass("Todo 追踪配对码：")
     if args.command == "inspect":
@@ -148,16 +166,24 @@ def main():
             if any(rule.get(key) != watch[key] for key in ("url", "variant", "quantity", "region")):
                 result = {"state": "needs_verification"}
             else:
-                context = None
                 try:
-                    context = p.chromium.launch_persistent_context(str(profiles / watch["platform"]), headless=True)
-                    page = context.pages[0] if context.pages else context.new_page()
-                    result = read_offer(page, watch, rule)
+                    folder = profiles / watch["platform"]
+                    with profile_lock(folder):
+                        context = p.chromium.launch_persistent_context(str(folder), headless=True,
+                                                                       executable_path=os.environ.get("CHROMIUM"))
+                        try:
+                            page = context.pages[0] if context.pages else context.new_page()
+                            result = read_offer(page, watch, rule)
+                        finally:
+                            context.close()
+                except BlockingIOError:
+                    if args.once:
+                        print("平台登录正在使用浏览器，请登录完成后重试", flush=True)
+                        return
+                    time.sleep(60)
+                    continue
                 except Exception:
                     result = {"state": "unavailable"}
-                finally:
-                    if context:
-                        context.close()
             for attempt in range(3):
                 try:
                     api(origin, token, "observe", watch_id=watch["id"], lease=watch["lease"], **result)

@@ -20,9 +20,10 @@ final class ApiService {
     private final RemotePush push;
     private final AiAssistant assistant;
     private final PriceTracker prices;
+    private final PriceLogin priceLogin;
 
     ApiService(Database storage, Accounts accounts, SyncService sync, Collaboration collaboration, ResetMail mail,
-               RemotePush push, AiAssistant assistant, PriceTracker prices) {
+               RemotePush push, AiAssistant assistant, PriceTracker prices, PriceLogin priceLogin) {
         this.storage = storage;
         this.accounts = accounts;
         this.sync = sync;
@@ -31,6 +32,7 @@ final class ApiService {
         this.push = push;
         this.assistant = assistant;
         this.prices = prices;
+        this.priceLogin = priceLogin;
     }
 
     Map<String, Object> dispatch(String route, String method, Map<String, Object> params) {
@@ -42,6 +44,10 @@ final class ApiService {
             return map();
         }
         if (UNCONFIGURED.contains(route)) throw new ApiException(1, "该功能需要在自建实例配置第三方服务");
+        if (method.equals("POST") && route.equals("/price/login")) {
+            var user = storage.transaction(false, db -> Accounts.authenticate(db, params));
+            return priceLogin.call(user, params);
+        }
         if (method.equals("POST") && Set.of("/price/collect", "/price/observe", "/price/inspect").contains(route))
             return storage.transaction(true, db -> prices.collector(db, route, params));
         return storage.transaction(!method.equals("GET"), db -> {

@@ -184,7 +184,7 @@ class ApiIntegrationTest {
                 var turn = objects(status.get("data")).get(0);
                 if ("done".equals(text(turn, "state"))) {
                     assertEquals("核对完成", turn.get("answer"));
-                    assertTrue(text(turn, "refs").contains("ai-test-first"));
+                    assertTrue(objects(turn.get("refs")).isEmpty(), "汇总不得附带逐笔账单引用");
                     done = true;
                     break;
                 }

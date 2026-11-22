@@ -125,10 +125,9 @@ final class AiData {
         if (!summary) return page(matches, request);
         var breakdown = new TreeMap<String, String>();
         groups.forEach((label, amount) -> breakdown.put(label, amount.toPlainString()));
-        var result = page(matches, request);
         return new Output(map("count", matches.size(), "expense", expense.toPlainString(), "income", income.toPlainString(),
                 "transfer", transfer.toPlainString(), "expense_by_party", breakdown,
-                "scope", all ? "all" : "counted", "examples", result.data().get("items")), result.refs());
+                "scope", all ? "all" : "counted"), List.of());
     }
 
     private static Output notes(Connection db, long user, Query request) throws SQLException {
