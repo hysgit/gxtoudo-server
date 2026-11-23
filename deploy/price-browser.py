@@ -220,13 +220,16 @@ class Browser:
             "page": page, "session": secrets.token_hex(24), "start": now, "touched": now,
         }
         try:
-            # Enter through the cart so the merchant can reuse an existing sign-in.
-            try:
-                page.goto(CART[platform], wait_until="domcontentloaded", timeout=8000)
-            except TimeoutError:
-                pass
-            if urlsplit(page.url).hostname not in LOGIN_HOSTS[platform] and not self.cart_authenticated(page, platform):
+            if platform == "jd":
+                # The desktop cart redirects to a desktop-only sign-in page.
                 self.open_login(page, platform)
+            else:
+                try:
+                    page.goto(CART[platform], wait_until="domcontentloaded", timeout=8000)
+                except TimeoutError:
+                    pass
+                if urlsplit(page.url).hostname not in LOGIN_HOSTS[platform] and not self.cart_authenticated(page, platform):
+                    self.open_login(page, platform)
             return self.frame(self.active)
         except (Error, Rejected):
             self.close()
