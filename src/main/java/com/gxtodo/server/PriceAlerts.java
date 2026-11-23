@@ -39,7 +39,7 @@ final class PriceAlerts {
     void tick() {
         long now = Instant.now().getEpochSecond();
         var outstanding = storage.transaction(false, db -> query(db, """
-                SELECT w.name,w.platform,o.id,o.amount,o.previous,o.observed_at,d.provider,d.token,d.login_id
+                SELECT w.name,w.platform,o.id,o.amount,o.previous,o.observed_at,o.basis,d.provider,d.token,d.login_id
                 FROM price_observations o JOIN price_watches w ON o.watch_id=w.id AND NOT w.deleted
                 JOIN users u ON u.id=w.user_id AND u.inactive=0
                 JOIN sessions s ON s.user_id=w.user_id AND s.expires>?
@@ -74,7 +74,8 @@ final class PriceAlerts {
         PushProviders.Result outcome;
         String platform = text(row, "platform").equals("jd") ? "京东" : "淘宝";
         String title = text(row, "name") + " 降价了";
-        String body = platform + "个人应付价 ¥" + money(row.get("previous")) + " → ¥" + money(row.get("amount"));
+        String priceLabel = text(row, "basis").equals("cart_display") ? "购物车显示价" : "个人应付价";
+        String body = platform + priceLabel + " ¥" + money(row.get("previous")) + " → ¥" + money(row.get("amount"));
         try {
             outcome = providers.sendEvent(text(row, "provider"), text(row, "token"),
                     digest("price:" + observation), title, body, now, Math.min(id(row, "observed_at") + 86400, now + 3600));

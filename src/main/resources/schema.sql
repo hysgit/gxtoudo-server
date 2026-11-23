@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS price_observations (
     UNIQUE(watch_id,request_id)
 );
 CREATE INDEX IF NOT EXISTS price_history ON price_observations(watch_id,id DESC);
+ALTER TABLE price_observations ADD COLUMN IF NOT EXISTS basis TEXT NOT NULL DEFAULT 'payable_verified';
 CREATE TABLE IF NOT EXISTS price_notifications (
     observation_id BIGINT NOT NULL REFERENCES price_observations(id),
     login_id BIGINT NOT NULL REFERENCES sessions(id),

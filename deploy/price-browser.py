@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.sync_api import Error, TimeoutError, sync_playwright
-from price_cart import CART, CART_ROWS, normalize
+from price_cart import CART, CART_ROWS, matching_prices, normalize
 
 LOGIN = {
     "jd": "https://plogin.m.jd.com/login/login?appid=100&returnurl=https%3A%2F%2Fm.jd.com%2F",
@@ -98,6 +98,14 @@ class Browser:
         owner = (data["user"], data["login"])
         action = data["action"]
         platform = data["platform"]
+        if action == "cart_prices":
+            targets = data["targets"]
+            if (platform != "taobao" or type(owner[0]) is not int or owner[0] < 1
+                    or owner[1] != 0 or not isinstance(targets, list) or not 1 <= len(targets) <= 30):
+                raise Rejected("采价请求无效")
+            if not (DATA / "profiles" / str(owner[0]) / platform / ".login-saved").is_file():
+                raise Rejected("请先登录平台并保存会话", "411")
+            return {"quotes": matching_prices(self.read_cart(owner, platform), targets)}
         if platform not in LOGIN or any(type(value) is not int or value < 1 for value in owner):
             raise Rejected("登录请求无效")
         if action == "status":
@@ -249,7 +257,7 @@ class Browser:
         page.set_default_timeout(5000)
         return profile, lock, context, page
 
-    def cart_list(self, owner, platform):
+    def read_cart(self, owner, platform):
         if self.active:
             raise Rejected("请先退出当前平台登录窗口再加载购物车", "409")
         _, lock, context, page = self.open_context(owner, platform, {"viewport": {"width": 1280, "height": 900}})
@@ -271,16 +279,22 @@ class Browser:
             except TimeoutError:
                 pass
             rows = normalize(platform, page.evaluate(CART_ROWS))
-            if not rows:
-                raise Rejected("购物车暂未读到可确认 SKU 和数量的商品，请检查购物车后重试")
         finally:
             try:
                 context.close()
             finally:
                 lock.close()
+        return rows
+
+    def cart_list(self, owner, platform):
+        rows = self.read_cart(owner, platform)
+        if not rows:
+            raise Rejected("购物车暂未读到可确认 SKU 和数量的商品，请检查购物车后重试")
         self.cart = {key: value for key, value in self.cart.items() if value[:2] != (owner, platform)}
         expires = time.monotonic() + 300
         for row in rows:
+            row.pop("unit_price", None)
+            row.pop("price_label", None)
             selection = secrets.token_hex(24)
             self.cart[selection] = (owner, platform, expires, row)
             row["selection"] = selection

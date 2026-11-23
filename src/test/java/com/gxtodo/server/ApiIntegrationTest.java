@@ -34,6 +34,7 @@ class ApiIntegrationTest {
     @Autowired Database database;
     @Autowired Accounts accounts;
     @Autowired AiData aiData;
+    @Autowired PriceTracker priceTracker;
     @Autowired javax.sql.DataSource source;
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
@@ -197,6 +198,48 @@ class ApiIntegrationTest {
             model.stop(0);
             Files.deleteIfExists(key);
         }
+    }
+
+    @Test
+    void managedCartPriceUsesTheExactSelectionAndKeepsItsOwnBaseline() throws Exception {
+        var owner = create("cart-owner");
+        var other = create("cart-other");
+        long user = id(owner, "user_id");
+        String url = "https://item.taobao.com/item.htm?id=56789&skuId=12345";
+        long watch = id(call("/price/watch", owner, "POST", "url", url, "quantity", 2,
+                "name", "测试商品", "variant", "黑色", "region", "杭州"), "id");
+        long otherQuantity = id(call("/price/watch", owner, "POST", "url", url, "quantity", 1,
+                "name", "测试商品", "variant", "黑色", "region", "杭州"), "id");
+        var browser = org.mockito.Mockito.mock(PriceLogin.class);
+        org.mockito.Mockito.when(browser.cartPrices(org.mockito.ArgumentMatchers.eq(user),
+                org.mockito.ArgumentMatchers.eq("taobao"), org.mockito.ArgumentMatchers.anyList()))
+                .thenReturn(map("quotes", List.of(map("url", url, "sku_id", "12345", "quantity", 2,
+                        "amount", "61.98", "details", "购物车显示价"))));
+        var worker = new ManagedPrices(database, browser, priceTracker, new org.springframework.mock.env.MockEnvironment());
+        try {
+            worker.tick();
+        } finally {
+            worker.close();
+        }
+        var history = objects(call("/price/history", owner, "GET", "id", watch).get("data"));
+        assertEquals(1, history.size());
+        assertEquals("61.9800", history.get(0).get("amount"));
+        assertEquals("cart_display", history.get(0).get("basis"));
+        assertTrue(objects(call("/price/history", owner, "GET", "id", otherQuantity).get("data")).isEmpty());
+        assertTrue(objects(call("/price/history", other, "GET", "id", watch).get("data")).isEmpty());
+
+        database.transaction(true, db -> {
+            Database.execute(db, "UPDATE price_watches SET next_check=0 WHERE id=?", watch);
+            return null;
+        });
+        String token = text(call("/price/collector", owner, "PUT"), "collector_token");
+        var lease = object(call("/price/collect", null, "POST", "collector_token", token,
+                "watches", List.of(map("id", watch))).get("data"));
+        assertEquals("0", call("/price/observe", null, "POST", "collector_token", token, "watch_id", watch,
+                "lease", lease.get("lease"), "state", "verified", "amount", "50.00", "details", "测试结算价").get("status"));
+        history = objects(call("/price/history", owner, "GET", "id", watch).get("data"));
+        assertEquals("payable_verified", history.get(0).get("basis"));
+        assertNull(history.get(0).get("previous"));
     }
 
     @Test

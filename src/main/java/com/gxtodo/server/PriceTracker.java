@@ -23,9 +23,9 @@ final class PriceTracker {
     Map<String, Object> list(Connection db, long user) throws SQLException {
         var watches = query(db, """
                 SELECT w.id,w.platform,w.url,w.name,w.variant,w.sku_id,w.quantity,w.region,w.state,w.next_check,
-                       p.amount::text,p.previous::text,p.details,p.observed_at
+                       p.amount::text,p.previous::text,p.details,p.observed_at,p.basis
                 FROM price_watches w LEFT JOIN LATERAL (
-                    SELECT amount,previous,details,observed_at FROM price_observations
+                    SELECT amount,previous,details,observed_at,basis FROM price_observations
                     WHERE watch_id=w.id ORDER BY id DESC LIMIT 1
                 ) p ON true WHERE w.user_id=? AND NOT w.deleted ORDER BY w.id DESC
                 """, user);
@@ -36,7 +36,7 @@ final class PriceTracker {
 
     Map<String, Object> history(Connection db, long user, long watch) throws SQLException {
         return map("data", query(db, """
-                SELECT p.amount::text,p.previous::text,p.details,p.observed_at FROM price_observations p
+                SELECT p.amount::text,p.previous::text,p.details,p.observed_at,p.basis FROM price_observations p
                 JOIN price_watches w ON w.id=p.watch_id
                 WHERE w.user_id=? AND w.id=? AND NOT w.deleted ORDER BY p.id DESC LIMIT 100
                 """, user, watch));
@@ -116,7 +116,7 @@ final class PriceTracker {
         return switch (route) {
             case "/price/inspect" -> list(db, user);
             case "/price/collect" -> claim(db, user, now, params);
-            default -> observe(db, user, now, params);
+            default -> observe(db, user, now, params, "payable_verified");
         };
     }
 
@@ -139,7 +139,7 @@ final class PriceTracker {
         return map("data", map());
     }
 
-    private Map<String, Object> observe(Connection db, long user, long now, Map<String, Object> params) throws SQLException {
+    Map<String, Object> observe(Connection db, long user, long now, Map<String, Object> params, String basis) throws SQLException {
         long watch = number(params.get("watch_id"), 1, Long.MAX_VALUE);
         String lease = string(params.get("lease"), 128, true);
         var row = one(db, "SELECT * FROM price_watches WHERE id=? AND user_id=? AND NOT deleted", watch, user);
@@ -157,12 +157,14 @@ final class PriceTracker {
             var amount = new BigDecimal(money);
             if (amount.signum() <= 0) throw new ApiException(1, "应付价必须大于零");
             String details = string(params.get("details"), 500, true);
-            var last = one(db, "SELECT amount FROM price_observations WHERE watch_id=? ORDER BY id DESC LIMIT 1", watch);
+            var last = one(db, """
+                    SELECT amount FROM price_observations WHERE watch_id=? AND basis=? ORDER BY id DESC LIMIT 1
+                    """, watch, basis);
             Object previous = last == null ? null : last.get("amount");
             execute(db, """
-                    INSERT INTO price_observations(watch_id,request_id,amount,previous,details,observed_at)
-                    VALUES(?,?,?,?,?,?)
-                    """, watch, lease, amount, previous, details, now);
+                    INSERT INTO price_observations(watch_id,request_id,amount,previous,details,observed_at,basis)
+                    VALUES(?,?,?,?,?,?,?)
+                    """, watch, lease, amount, previous, details, now, basis);
         }
         execute(db, "UPDATE price_watches SET state=?,next_check=?,lease='',lease_until=0 WHERE id=?", state, now + 1800, watch);
         return map();

@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -38,7 +39,7 @@ final class PriceLogin {
     }
 
     Map<String, Object> call(Map<String, Object> user, Map<String, Object> params) {
-        if (worker == null || credential.isBlank()) throw new ApiException(1, "此服务端还没有启用平台登录");
+        if (!available()) throw new ApiException(1, "此服务端还没有启用平台登录");
         String platform = text(params, "platform");
         String action = text(params, "action");
         if (!Set.of("jd", "taobao").contains(platform) || !ACTIONS.contains(action))
@@ -87,8 +88,21 @@ final class PriceLogin {
                 payload.put("key", key);
             }
         }
+        return exchange(payload, Duration.ofSeconds(25));
+    }
+
+    boolean available() {
+        return worker != null && !credential.isBlank();
+    }
+
+    Map<String, Object> cartPrices(long user, String platform, List<Map<String, Object>> targets) {
+        return object(exchange(map("user", user, "login", 0, "platform", platform, "action", "cart_prices",
+                "targets", targets), Duration.ofSeconds(35)).get("data"));
+    }
+
+    private Map<String, Object> exchange(Map<String, Object> payload, Duration timeout) {
         try {
-            var request = HttpRequest.newBuilder(worker).timeout(Duration.ofSeconds(25))
+            var request = HttpRequest.newBuilder(worker).timeout(timeout)
                     .header("Authorization", "Bearer " + credential)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(json(payload))).build();

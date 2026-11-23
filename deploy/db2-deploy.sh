@@ -78,7 +78,7 @@ fi
 # Validate the new Java process and storage before interrupting the old API.
 docker run -d --name "gxtudo-preflight-$release" --network gxtudo-storage --env-file "$config" \
   "${push_mount[@]}" "${ai_mount[@]}" "${price_mount[@]}" \
-  -e GXTODO_PUSH_WORKER=false -e GXTODO_AI_WORKER=false "$image" >/dev/null
+  -e GXTODO_PUSH_WORKER=false -e GXTODO_AI_WORKER=false -e GXTODO_MANAGED_PRICE_WORKER=false "$image" >/dev/null
 if [[ -n "$price_network" ]]; then docker network connect "$price_network" "gxtudo-preflight-$release"; fi
 preflight=false
 for attempt in $(seq 1 60); do

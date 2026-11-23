@@ -1,5 +1,6 @@
 """Read displayed cart lines and keep the exact SKU picked in the merchant cart."""
 import re
+from decimal import Decimal
 from urllib.parse import parse_qs, urlsplit
 
 CART = {
@@ -51,6 +52,30 @@ CART_ROWS = r"""() => {
     return (u.searchParams.get('id') || u.pathname.match(/[0-9]+/)?.[0] || '') +
       ':' + (u.searchParams.get('skuId') || u.searchParams.get('skuid') || '');
   };
+  const shownPrice = row => {
+    const box = row.querySelector('.trade-cart-item-price');
+    if (!box) return {};
+    const visible = el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+    const prices = [];
+    for (const part of box.querySelectorAll('.trade-price-container')) {
+      if (!visible(part) || part.closest('del,s,strike') ||
+          getComputedStyle(part).textDecorationLine.includes('line-through')) continue;
+      const label = clean(part.querySelector('.trade-price-label')?.innerText);
+      if (label && !/^(秒杀价|平台加补后|店铺优惠后|优惠后|券后价|券后|活动价|到手价)$/.test(label)) continue;
+      const units = clean(part.querySelector('.trade-price-integer')?.innerText).replace(/,/g, '');
+      const cents = clean(part.querySelector('.trade-price-decimal')?.innerText);
+      const currency = clean(part.querySelector('.trade-price-symbol')?.innerText);
+      if (!/^[0-9]{1,16}$/.test(units) || (cents && !/^[0-9]{1,4}$/.test(cents)) ||
+          (currency !== '¥' && currency !== '￥')) continue;
+      const primary = !!label || part.classList.contains('type-of-12-14B-16B')
+        || !!part.closest('[class^="priceDetail--"],[class*=" priceDetail--"]');
+      prices.push({amount: units + (cents ? '.' + cents : ''), label, primary});
+    }
+    const primary = prices.filter(item => item.primary);
+    const eligible = primary.length ? primary : prices;
+    if (eligible.length !== 1) return {};
+    return {unit_price: eligible[0].amount, price_label: eligible[0].label};
+  };
   const rows = [];
   for (const row of document.querySelectorAll('.trade-cart-item-info')) {
     if (!row.getClientRects().length || /已下架|商品失效|已失效/.test(row.innerText)) continue;
@@ -64,7 +89,7 @@ CART_ROWS = r"""() => {
     if (!link || !/^[1-9][0-9]{0,2}$/.test(qty)) continue;
     const selected = row.querySelector('.trade-cart-item-sku-old');
     rows.push({url: link.href, name: clean(link.innerText).slice(0,120), quantity: qty,
-      variant: clean(selected?.innerText).slice(0,150), sku_id: ''});
+      variant: clean(selected?.innerText).slice(0,150), sku_id: '', ...shownPrice(row)});
   }
   for (const a of document.querySelectorAll('a[href]')) {
     if (a.closest('.trade-cart-item-info')) continue;
@@ -122,4 +147,27 @@ def normalize(platform, candidates):
             continue
         accepted[identity] = {"name": source["name"], "variant": spec, "quantity": qty,
                               "sku_id": sku, "url": canonical}
+        unit = source.get("unit_price", "")
+        if re.fullmatch(r"[0-9]{1,16}(\.[0-9]{1,4})?", unit or ""):
+            line = Decimal(unit) * qty
+            if 0 < line < 10 ** 16:
+                accepted[identity]["unit_price"] = unit
+                accepted[identity]["price_label"] = source.get("price_label", "")
     return list(accepted.values())[:100]
+
+
+def matching_prices(rows, targets):
+    keys = {(item["url"], item["sku_id"], item["quantity"]) for item in targets}
+    result = []
+    for row in rows:
+        unit = row.get("unit_price")
+        key = (row["url"], row["sku_id"], row["quantity"])
+        if key not in keys or not unit:
+            continue
+        amount = format(Decimal(unit) * row["quantity"], "f")
+        label = row.get("price_label")
+        source = f"购物车显示价（{label}）" if label else "购物车显示价"
+        result.append({"url": row["url"], "sku_id": row["sku_id"], "quantity": row["quantity"],
+                       "amount": amount,
+                       "details": f"{source}，单价 ¥{unit} × {row['quantity']}。未核验结算优惠和运费。"})
+    return result
