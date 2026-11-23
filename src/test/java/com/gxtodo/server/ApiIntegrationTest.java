@@ -213,6 +213,47 @@ class ApiIntegrationTest {
     }
 
     @Test
+    void desktopLoginRequiresPhoneApprovalAndTheOriginalDesktopVerifier() throws Exception {
+        var owner = create("desk-owner");
+        var other = create("desk-other");
+        String verifier = Accounts.token();
+        var started = call("/desktop-login/start", null, "POST",
+                "challenge", digest(verifier), "dev_id", "desktop-" + "a".repeat(32), "label", "Windows 桌面端");
+        assertEquals("0", started.get("status"));
+        String request = text(started, "request");
+        assertTrue(text(started, "code").matches("[0-9]{6}"));
+        assertEquals("waiting", call("/desktop-login/poll", null, "POST",
+                "request", request, "verifier", verifier).get("state"));
+        assertEquals("5", call("/desktop-login/approve", null, "POST", "request", request).get("status"));
+        assertEquals("410", call("/desktop-login/preview", owner, "POST", "request", request + "x").get("status"));
+        assertEquals(started.get("code"), call("/desktop-login/preview", owner, "POST", "request", request).get("code"));
+        assertEquals("0", call("/desktop-login/approve", owner, "POST", "request", request).get("status"));
+        assertEquals("410", call("/desktop-login/approve", other, "POST", "request", request).get("status"));
+        assertEquals("410", call("/desktop-login/poll", null, "POST",
+                "request", request, "verifier", Accounts.token()).get("status"));
+
+        var clients = Executors.newFixedThreadPool(2);
+        Map<String, Object> desktop;
+        try {
+            Callable<Map<String, Object>> redeem = () -> call("/desktop-login/poll", null, "POST",
+                    "request", request, "verifier", verifier);
+            var replies = new ArrayList<Map<String, Object>>();
+            for (var response : clients.invokeAll(List.of(redeem, redeem))) replies.add(response.get());
+            assertEquals(1, replies.stream().filter(reply -> "complete".equals(reply.get("state"))).count());
+            assertEquals(1, replies.stream().filter(reply -> "410".equals(reply.get("status"))).count());
+            desktop = replies.stream().filter(reply -> "complete".equals(reply.get("state"))).findFirst().orElseThrow();
+        } finally {
+            clients.shutdownNow();
+        }
+        assertEquals(id(owner, "user_id"), id(desktop, "user_id"));
+        assertNotEquals(id(owner, "login_id"), id(desktop, "login_id"));
+        assertEquals("0", call("/user/base", desktop, "GET").get("status"));
+        assertEquals("0", call("/user/session", desktop, "DELETE").get("status"));
+        assertEquals("5", call("/user/base", desktop, "GET").get("status"));
+        assertEquals("0", call("/user/base", owner, "GET").get("status"));
+    }
+
+    @Test
     void managedCartPriceUsesTheExactSelectionAndKeepsItsOwnBaseline() throws Exception {
         var owner = create("cart-owner");
         var other = create("cart-other");

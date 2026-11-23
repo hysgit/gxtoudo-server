@@ -21,9 +21,10 @@ final class ApiService {
     private final AiAssistant assistant;
     private final PriceTracker prices;
     private final PriceLogin priceLogin;
+    private final DesktopLogin desktopLogin;
 
     ApiService(Database storage, Accounts accounts, SyncService sync, Collaboration collaboration, ResetMail mail,
-               RemotePush push, AiAssistant assistant, PriceTracker prices, PriceLogin priceLogin) {
+               RemotePush push, AiAssistant assistant, PriceTracker prices, PriceLogin priceLogin, DesktopLogin desktopLogin) {
         this.storage = storage;
         this.accounts = accounts;
         this.sync = sync;
@@ -33,11 +34,21 @@ final class ApiService {
         this.assistant = assistant;
         this.prices = prices;
         this.priceLogin = priceLogin;
+        this.desktopLogin = desktopLogin;
     }
 
     Map<String, Object> dispatch(String route, String method, Map<String, Object> params) {
         if (route.equals("/user/login") && method.equals("POST")) return accounts.login(params, false);
         if (route.equals("/user/base") && method.equals("POST")) return accounts.login(params, true);
+        if (route.startsWith("/desktop-login/") && method.equals("POST")) {
+            return switch (route) {
+                case "/desktop-login/start" -> desktopLogin.start(params);
+                case "/desktop-login/preview" -> desktopLogin.preview(params);
+                case "/desktop-login/approve" -> desktopLogin.approve(params);
+                case "/desktop-login/poll" -> desktopLogin.poll(params);
+                default -> throw new ApiException(1, "未知桌面登录操作");
+            };
+        }
         if (route.equals("/user/mail") && method.equals("POST")) {
             mail.validate();
             mail.send(accounts.issueReset(params));
@@ -78,6 +89,9 @@ final class ApiService {
             switch (route + " " + method) {
                 case "/user/base GET": return map("data", Accounts.profile(user));
                 case "/user/base PUT": return Accounts.updateProfile(db, user, params);
+                case "/user/session DELETE":
+                    execute(db, "UPDATE sessions SET expires=0 WHERE id=?", user.get("login_id"));
+                    return map();
                 case "/user/vipInfo GET": return map("data", map("is_vip", 0, "remaining_days", 0, "vip_expired_at", ""));
                 case "/user/deactivate PUT":
                     execute(db, "UPDATE users SET inactive=1 WHERE id=?", user.get("id"));

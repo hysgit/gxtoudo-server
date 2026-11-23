@@ -101,7 +101,6 @@ final class Accounts {
         String address = email(params.get("email"));
         String password = string(params.get("password"), 128, true);
         String device = string(params.get("dev_id"), 256, true);
-        String token = token();
         String hashed = register ? passwordHash(password) : null;
         Map<String, Object> found = register ? null : storage.transaction(false,
                 db -> one(db, "SELECT * FROM users WHERE email=?", address));
@@ -132,14 +131,19 @@ final class Accounts {
                     throw new ApiException(10022, "邮箱或密码已更新，请重新登录");
                 }
             }
-            execute(db, "INSERT INTO sessions(user_id,device,token_hash,expires) VALUES(?,?,?,?) "
-                    + "ON CONFLICT(user_id,device) DO UPDATE SET token_hash=excluded.token_hash,expires=excluded.expires",
-                    userId, device, digest(token), Instant.now().getEpochSecond() + 30L * 86400);
-            long loginId = id(one(db, "SELECT id FROM sessions WHERE user_id=? AND device=?", userId, device), "id");
-            List<Map<String, Object>> spaces = teams(db, userId);
-            for (int i = 0; i < spaces.size(); i++) spaces.set(i, teamData(db, spaces.get(i)));
-            return map("user_id", userId, "login_id", loginId, "token", token, "data", profile(user), "teamData", spaces);
+            return issueSession(db, user, device);
         });
+    }
+
+    static Map<String, Object> issueSession(Connection db, Map<String, Object> user, String device) throws SQLException {
+        long userId = id(user, "id");
+        String token = token();
+        var session = one(db, "INSERT INTO sessions(user_id,device,token_hash,expires) VALUES(?,?,?,?) "
+                + "ON CONFLICT(user_id,device) DO UPDATE SET token_hash=excluded.token_hash,expires=excluded.expires RETURNING id",
+                userId, device, digest(token), Instant.now().getEpochSecond() + 30L * 86400);
+        List<Map<String, Object>> spaces = teams(db, userId);
+        for (int i = 0; i < spaces.size(); i++) spaces.set(i, teamData(db, spaces.get(i)));
+        return map("user_id", userId, "login_id", id(session, "id"), "token", token, "data", profile(user), "teamData", spaces);
     }
 
     static Map<String, Object> authenticate(Connection db, Map<String, Object> params) throws SQLException {
