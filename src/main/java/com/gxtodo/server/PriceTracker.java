@@ -22,7 +22,7 @@ final class PriceTracker {
 
     Map<String, Object> list(Connection db, long user) throws SQLException {
         var watches = query(db, """
-                SELECT w.id,w.platform,w.url,w.name,w.variant,w.quantity,w.region,w.state,w.next_check,
+                SELECT w.id,w.platform,w.url,w.name,w.variant,w.sku_id,w.quantity,w.region,w.state,w.next_check,
                        p.amount::text,p.previous::text,p.details,p.observed_at
                 FROM price_watches w LEFT JOIN LATERAL (
                     SELECT amount,previous,details,observed_at FROM price_observations
@@ -50,17 +50,21 @@ final class PriceTracker {
         if (host == null || !"https".equals(url.getScheme()) || url.getUserInfo() != null || url.getPort() != -1) {
             throw new ApiException(1, "请输入京东或淘宝的 HTTPS 商品详情链接");
         }
-        String platform, canonical;
+        String platform, canonical, sku;
         var match = JD.matcher(url.getPath() == null ? "" : url.getPath());
         if (JD_HOSTS.contains(host) && match.matches()) {
             platform = "jd";
-            canonical = "https://item.jd.com/" + match.group(1) + ".html";
+            sku = match.group(1);
+            canonical = "https://item.jd.com/" + sku + ".html";
         } else if (TAOBAO.contains(host) && ("/item.htm".equals(url.getPath()) || "/item.html".equals(url.getPath()))) {
             platform = "taobao";
             String item = numericQuery(url, "id", true);
-            String sku = numericQuery(url, "skuId", false);
+            sku = numericQuery(url, "skuId", false);
             canonical = "https://" + host + "/item.htm?id=" + item + (sku.isEmpty() ? "" : "&skuId=" + sku);
         } else throw new ApiException(1, "请在浏览器打开分享链接后复制商品详情页地址");
+        if (params.containsKey("sku_id") && (sku.isBlank() || !sku.equals(text(params, "sku_id")))) {
+            throw new ApiException(1, "无法确认购物车选中的 SKU，请重新加载购物车");
+        }
         String name = string(params.get("name"), 120, true).strip();
         String variant = string(params.get("variant"), 150, true).strip();
         String region = string(params.get("region"), 120, true).strip();
@@ -68,12 +72,13 @@ final class PriceTracker {
         if (id(one(db, "SELECT COUNT(*) AS n FROM price_watches WHERE user_id=? AND NOT deleted", user), "n") >= 30)
             throw new ApiException(1, "最多追踪 30 件商品");
         var duplicate = one(db, """
-                SELECT id FROM price_watches WHERE user_id=? AND url=? AND variant=? AND quantity=? AND region=? AND NOT deleted
-                """, user, canonical, variant, qty, region);
+                SELECT id FROM price_watches WHERE user_id=? AND url=?
+                  AND (?<>'' OR variant=?) AND quantity=? AND region=? AND NOT deleted
+                """, user, canonical, sku, variant, qty, region);
         if (duplicate != null) return duplicate;
         return map("id", insert(db, """
-                INSERT INTO price_watches(user_id,platform,url,name,variant,quantity,region) VALUES(?,?,?,?,?,?,?)
-                """, user, platform, canonical, name, variant, qty, region));
+                INSERT INTO price_watches(user_id,platform,url,name,variant,quantity,region,sku_id) VALUES(?,?,?,?,?,?,?,?)
+                """, user, platform, canonical, name, variant, qty, region, sku));
     }
 
     private static String numericQuery(URI uri, String key, boolean required) {
@@ -121,7 +126,7 @@ final class PriceTracker {
         Set<Long> ids = new HashSet<>();
         for (var row : watched) ids.add(number(row.get("id"), 1, Long.MAX_VALUE));
         for (var row : query(db, """
-                SELECT id,platform,url,variant,quantity,region,name FROM price_watches
+                SELECT id,platform,url,variant,sku_id,quantity,region,name FROM price_watches
                 WHERE user_id=? AND NOT deleted AND next_check<=? AND lease_until<=? ORDER BY next_check,id
                 """, user, now, now)) {
             long watch = id(row, "id");

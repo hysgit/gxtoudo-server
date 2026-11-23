@@ -48,6 +48,16 @@ final class ApiService {
             var user = storage.transaction(false, db -> Accounts.authenticate(db, params));
             return priceLogin.call(user, params);
         }
+        if (method.equals("POST") && route.equals("/price/from-cart")) {
+            var user = storage.transaction(false, db -> Accounts.authenticate(db, params));
+            var row = object(priceLogin.call(user, map("action", "cart_resolve",
+                    "platform", params.get("platform"), "selection", params.get("selection"))).get("data"));
+            row.put("region", string(params.get("region"), 120, true));
+            return storage.transaction(true, db -> {
+                var current = Accounts.authenticate(db, params);
+                return prices.create(db, id(current, "id"), row);
+            });
+        }
         if (method.equals("POST") && Set.of("/price/collect", "/price/observe", "/price/inspect").contains(route))
             return storage.transaction(true, db -> prices.collector(db, route, params));
         return storage.transaction(!method.equals("GET"), db -> {

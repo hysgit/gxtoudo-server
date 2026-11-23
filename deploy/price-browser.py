@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.sync_api import Error, TimeoutError, sync_playwright
+from price_cart import CART, CART_ROWS, normalize
 
 LOGIN = {
     "jd": "https://plogin.m.jd.com/login/login?appid=100&returnurl=https%3A%2F%2Fm.jd.com%2F",
@@ -73,6 +74,7 @@ class Browser:
             "device_scale_factor": 1, "is_mobile": True, "has_touch": True,
         }
         self.active = None
+        self.cart = {}
 
     def close(self):
         if not self.active:
@@ -85,8 +87,9 @@ class Browser:
             session["lock"].close()
 
     def expire(self):
+        now = time.monotonic()
+        self.cart = {key: value for key, value in self.cart.items() if value[2] > now}
         if self.active:
-            now = time.monotonic()
             if now - self.active["touched"] > IDLE_SECONDS or now - self.active["start"] > MAX_SECONDS:
                 self.close()
 
@@ -102,6 +105,13 @@ class Browser:
             return {"saved_at": int(marker.stat().st_mtime) if marker.is_file() else 0}
         if action == "start":
             return self.start(owner, platform)
+        if action == "cart_list":
+            return self.cart_list(owner, platform)
+        if action == "cart_resolve":
+            selected = self.cart.get(data["selection"])
+            if not selected or selected[0] != owner or selected[1] != platform:
+                raise Rejected("购物车选择已过期，请重新加载", "410")
+            return selected[3]
         current = self.active
         if (not current or current["owner"] != owner or current["platform"] != platform
                 or not hmac.compare_digest(current["session"], str(data.get("session", "")))):
@@ -129,12 +139,12 @@ class Browser:
             page.mouse.move(data["x"], data["y"])
             page.mouse.wheel(0, data["dy"])
         elif action == "drag":
-            page.mouse.move(data["from_x"], data["from_y"])
-            page.mouse.down()
-            try:
-                page.mouse.move(data["to_x"], data["to_y"], steps=8)
-            finally:
-                page.mouse.up()
+            self.touch(page, [
+                {"x": data["from_x"], "y": data["from_y"], "ms": 0},
+                {"x": data["to_x"], "y": data["to_y"], "ms": 0},
+            ])
+        elif action == "gesture":
+            self.touch(page, data["points"])
         elif action == "type":
             page.keyboard.insert_text(data["input"])
         elif action == "key":
@@ -144,6 +154,34 @@ class Browser:
         elif action != "frame":
             raise Rejected("不支持这个登录操作")
         return self.frame(current)
+
+    @staticmethod
+    def touch(page, points):
+        connection = page.context.new_cdp_session(page)
+        def send(kind, point=None):
+            coordinates = [] if point is None else [{"x": point["x"], "y": point["y"]}]
+            connection.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": coordinates})
+        try:
+            send("touchStart", points[0])
+            previous = points[0]["ms"]
+            for point in points[1:]:
+                elapsed = point["ms"] - previous
+                if elapsed > 0:
+                    page.wait_for_timeout(elapsed)
+                send("touchMove", point)
+                previous = point["ms"]
+            send("touchEnd")
+        except Error:
+            try:
+                send("touchCancel")
+            except Error:
+                pass
+            raise
+        finally:
+            try:
+                connection.detach()
+            except Error:
+                pass
 
     @staticmethod
     def open_login(page, platform):
@@ -160,12 +198,33 @@ class Browser:
                 self.active["touched"] = time.monotonic()
                 return self.frame(self.active)
             self.close()
+        profile, lock, context, page = self.open_context(owner, platform, self.mobile)
+        # Track an official login popup if the merchant opens one during verification.
+        def on_page(child):
+            if self.active and self.active["context"] is context:
+                child.set_default_timeout(5000)
+                self.active["page"] = child
+                child.on("close", lambda: self.restore_page(context, child))
+        context.on("page", on_page)
+        now = time.monotonic()
+        self.active = {
+            "owner": owner, "platform": platform, "profile": profile, "lock": lock, "context": context,
+            "page": page, "session": secrets.token_hex(24), "start": now, "touched": now,
+        }
+        try:
+            self.open_login(page, platform)
+            return self.frame(self.active)
+        except (Error, Rejected):
+            self.close()
+            raise
+
+    def open_context(self, owner, platform, options):
         profile = mounted_profile(owner[0], platform)
         lock = with_profile(profile)
         try:
             context = self.chromium.launch_persistent_context(
                 str(profile), executable_path=os.environ.get("CHROMIUM"), headless=True,
-                **self.mobile, accept_downloads=False,
+                **options, accept_downloads=False,
                 service_workers="block", locale="zh-CN", timezone_id="Asia/Shanghai",
                 chromium_sandbox=os.environ.get("GXTODO_CHROME_SANDBOX") == "1",
                 timeout=8000,
@@ -188,24 +247,44 @@ class Browser:
         context.route("**/*", allow)
         page = context.pages[0] if context.pages else context.new_page()
         page.set_default_timeout(5000)
-        # Track an official login popup if the merchant opens one during verification.
-        def on_page(child):
-            if self.active and self.active["context"] is context:
-                child.set_default_timeout(5000)
-                self.active["page"] = child
-                child.on("close", lambda: self.restore_page(context, child))
-        context.on("page", on_page)
-        now = time.monotonic()
-        self.active = {
-            "owner": owner, "platform": platform, "profile": profile, "lock": lock, "context": context,
-            "page": page, "session": secrets.token_hex(24), "start": now, "touched": now,
-        }
+        return profile, lock, context, page
+
+    def cart_list(self, owner, platform):
+        if self.active:
+            raise Rejected("请先退出当前平台登录窗口再加载购物车", "409")
+        _, lock, context, page = self.open_context(owner, platform, {"viewport": {"width": 1280, "height": 900}})
         try:
-            self.open_login(page, platform)
-            return self.frame(self.active)
-        except (Error, Rejected):
-            self.close()
-            raise
+            try:
+                page.goto(CART[platform], wait_until="domcontentloaded", timeout=10000)
+            except TimeoutError:
+                pass
+            page.wait_for_timeout(1600)
+            host = urlsplit(page.url).hostname
+            expected = urlsplit(CART[platform]).hostname
+            if host in LOGIN_HOSTS[platform]:
+                raise Rejected("购物车会话未登录或已过期，请重新登录平台", "411")
+            if host != expected:
+                raise Rejected("未能打开官方购物车，请稍后重试")
+            row_selector = ".trade-cart-item-info" if platform == "taobao" else ".item-form, .cart-item"
+            try:
+                page.locator(row_selector).first.wait_for(state="visible", timeout=6500)
+            except TimeoutError:
+                pass
+            rows = normalize(platform, page.evaluate(CART_ROWS))
+            if not rows:
+                raise Rejected("购物车暂未读到可确认 SKU 和数量的商品，请检查购物车后重试")
+        finally:
+            try:
+                context.close()
+            finally:
+                lock.close()
+        self.cart = {key: value for key, value in self.cart.items() if value[:2] != (owner, platform)}
+        expires = time.monotonic() + 300
+        for row in rows:
+            selection = secrets.token_hex(24)
+            self.cart[selection] = (owner, platform, expires, row)
+            row["selection"] = selection
+        return {"items": rows}
 
     def restore_page(self, context, child):
         active = self.active

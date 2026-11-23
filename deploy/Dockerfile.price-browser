@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir playwright==1.65.2 \
     && useradd --uid 10001 --gid 10001 --home-dir /data --no-create-home browser \
     && install -d -m 0700 -o 10001 -g 10001 /data
 ENV CHROMIUM=/opt/chrome-headless-shell-linux64/chrome-headless-shell HOME=/data PYTHONUNBUFFERED=1
-COPY deploy/price-browser.py deploy/price-collector.py /app/
+COPY deploy/price-browser.py deploy/price-collector.py deploy/price_cart.py /app/
 USER 10001:10001
 EXPOSE 8790
 ENTRYPOINT ["python", "/app/price-browser.py"]
