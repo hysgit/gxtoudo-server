@@ -40,14 +40,26 @@ class Rejected(Exception):
         self.message, self.code = message, code
 
 
-def official(url, platform, main_frame=False):
+def official(url, platform, main_frame=False, resource_type=""):
     parsed = urlsplit(url)
     host = parsed.hostname
     if parsed.scheme != "https" or not host or parsed.username or parsed.port not in (443, None):
         return False
+    if (platform == "jd" and not main_frame and host in {"jstatic.3.cn", "jstatic2.3.cn"}
+            and parsed.path.startswith("/car/") and resource_type in {"script", "stylesheet", "image", "font"}):
+        return True
     roots = ("jd.com", "jd.hk") if platform == "jd" else ("taobao.com", "tmall.com")
     return any(host == domain or host.endswith("." + domain)
                for domain in (roots if main_frame else DOMAINS[platform]))
+
+
+def cart_location(url, platform):
+    parsed = urlsplit(url)
+    if not official(url, platform, main_frame=True):
+        return False
+    if platform == "jd":
+        return parsed.hostname in {"p.m.jd.com", "mtrade.jd.hk"} and parsed.path == "/cart/cart.action"
+    return parsed.hostname == urlsplit(CART[platform]).hostname
 
 
 def mounted_profile(user, platform):
@@ -256,7 +268,7 @@ class Browser:
                 navigation = req.is_navigation_request() and req.frame.parent_frame is None
             except Error:
                 navigation = False
-            if official(req.url, platform, navigation):
+            if official(req.url, platform, navigation, req.resource_type):
                 route.continue_()
             else:
                 route.abort()
@@ -269,26 +281,28 @@ class Browser:
     def read_cart(self, owner, platform):
         if self.active:
             raise Rejected("请先退出当前平台登录窗口再加载购物车", "409")
-        _, lock, context, page = self.open_context(owner, platform, {"viewport": {"width": 1280, "height": 900}})
+        options = self.mobile if platform == "jd" else {"viewport": {"width": 1280, "height": 900}}
+        _, lock, context, page = self.open_context(owner, platform, options)
         try:
             try:
                 page.goto(CART[platform], wait_until="domcontentloaded", timeout=10000)
             except TimeoutError:
                 pass
             page.wait_for_timeout(1600)
-            host = urlsplit(page.url).hostname
-            expected = urlsplit(CART[platform]).hostname
-            if host in LOGIN_HOSTS[platform]:
-                raise Rejected("购物车会话未登录或已过期，请重新登录平台", "411")
-            if host != expected:
-                raise Rejected("未能打开官方购物车，请稍后重试")
-            row_selector = ".trade-cart-item-info" if platform == "taobao" else ".item-form, .cart-item"
+            row_selector = (".trade-cart-item-info" if platform == "taobao" else
+                            ".item-form, .cart-item, #app :text-is('页面开小差，再试试')")
             try:
                 page.locator(row_selector).first.wait_for(state="visible", timeout=6500)
             except TimeoutError:
                 pass
+            if urlsplit(page.url).hostname in LOGIN_HOSTS[platform]:
+                raise Rejected("购物车会话未登录或已过期，请重新登录平台", "411")
+            if not cart_location(page.url, platform):
+                raise Rejected("未能打开官方购物车，请稍后重试")
             if not self.cart_authenticated(page, platform):
                 raise Rejected("无法确认购物车已登录，请重新登录平台", "411")
+            if platform == "jd" and page.get_by_text("页面开小差，再试试", exact=True).first.is_visible():
+                raise Rejected("京东手机购物车暂时未返回商品，请稍后重试")
             rows = normalize(platform, page.evaluate(CART_ROWS))
         finally:
             try:
@@ -299,11 +313,11 @@ class Browser:
 
     @staticmethod
     def cart_authenticated(page, platform):
-        if urlsplit(page.url).hostname != urlsplit(CART[platform]).hostname:
+        if not cart_location(page.url, platform):
             return False
-        if platform != "taobao":
-            return not page.locator('a[href*="passport.jd.com/new/login"]').first.is_visible()
-        cookie_names = {cookie["name"] for cookie in page.context.cookies([CART[platform]]) if cookie["value"]}
+        cookie_names = {cookie["name"] for cookie in page.context.cookies([page.url]) if cookie["value"]}
+        if platform == "jd":
+            return {"pt_pin", "pt_key"} <= cookie_names and not page.get_by_text("去登录", exact=True).first.is_visible()
         return {"unb", "cookie2"} <= cookie_names and not page.locator(".mini-login").first.is_visible()
 
     def cart_list(self, owner, platform):

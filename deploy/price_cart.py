@@ -4,7 +4,7 @@ from decimal import Decimal
 from urllib.parse import parse_qs, urlsplit
 
 CART = {
-    "jd": "https://cart.jd.com/cart.action",
+    "jd": "https://p.m.jd.com/cart/cart.action",
     "taobao": "https://cart.taobao.com/cart.htm",
 }
 
