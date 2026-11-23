@@ -44,9 +44,22 @@ final class ApiService {
             return map();
         }
         if (UNCONFIGURED.contains(route)) throw new ApiException(1, "该功能需要在自建实例配置第三方服务");
+        if (route.equals("/ai/chat") && method.equals("POST") && params.containsKey("image"))
+            return assistant.submitImage(params);
+        if (route.equals("/ai/image") && method.equals("GET")) return assistant.image(params);
         if (method.equals("POST") && route.equals("/price/login")) {
             var user = storage.transaction(false, db -> Accounts.authenticate(db, params));
-            return priceLogin.call(user, params);
+            var result = priceLogin.call(user, params);
+            if ("finish".equals(text(params, "action"))) {
+                storage.transaction(true, db -> {
+                    var current = Accounts.authenticate(db, params);
+                    execute(db, "UPDATE price_watches SET next_check=0 WHERE user_id=? AND platform=? AND NOT deleted "
+                            + "AND state IN ('waiting','login_required') AND lease_until<=?",
+                            current.get("id"), text(params, "platform"), java.time.Instant.now().getEpochSecond());
+                    return null;
+                });
+            }
+            return result;
         }
         if (method.equals("POST") && route.equals("/price/from-cart")) {
             var user = storage.transaction(false, db -> Accounts.authenticate(db, params));

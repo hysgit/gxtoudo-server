@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.InputStream;
+import java.io.ByteArrayInputStream;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.sql.Connection;
@@ -23,6 +24,7 @@ import static com.gxtodo.server.Protocol.*;
 @RestController
 final class MediaStorage {
     static final long MAX_SIZE = 100L * 1024 * 1024;
+    static final int AI_IMAGE_LIMIT = 3 * 1024 * 1024;
     private final Database storage;
     private final MinioClient client;
     private final String bucket;
@@ -53,6 +55,33 @@ final class MediaStorage {
         ensureBucket();
         if (!client.bucketExists(BucketExistsArgs.builder().bucket(bucket).build())) {
             throw new IllegalStateException("Media bucket unavailable");
+        }
+    }
+
+    String storeAiImage(long user, byte[] bytes, String mime) throws Exception {
+        ensureBucket();
+        String key = "ai/" + user + "/" + UUID.randomUUID();
+        try (var input = new ByteArrayInputStream(bytes)) {
+            client.putObject(PutObjectArgs.builder().bucket(bucket).object(key)
+                    .stream(input, bytes.length, -1).contentType(mime).build());
+        }
+        return key;
+    }
+
+    byte[] readAiImage(String key) throws Exception {
+        ensureBucket();
+        try (var input = client.getObject(GetObjectArgs.builder().bucket(bucket).object(key).build())) {
+            byte[] bytes = input.readNBytes(AI_IMAGE_LIMIT + 1);
+            if (bytes.length > AI_IMAGE_LIMIT) throw new IllegalStateException("AI image exceeds the limit");
+            return bytes;
+        }
+    }
+
+    void discardAiImage(String key) {
+        try {
+            client.removeObject(RemoveObjectArgs.builder().bucket(bucket).object(key).build());
+        } catch (Exception error) {
+            org.slf4j.LoggerFactory.getLogger(MediaStorage.class).warn("Failed to remove an unused AI image");
         }
     }
 

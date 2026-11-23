@@ -72,15 +72,15 @@ final class ManagedPrices {
 
         Map<Key, Map<String, Object>> quotes = new HashMap<>();
         String failure = "needs_verification";
-        long retry = 1800;
+        long retry = PriceTracker.CHECK_INTERVAL;
         try {
             var result = browser.cartPrices(batch.user(), batch.platform(), batch.watches());
             for (var quote : objects(result.get("quotes"))) quotes.put(Key.from(quote), quote);
         } catch (ApiException error) {
             switch (error.status) {
                 case "409" -> { failure = ""; retry = 45; }
-                case "411" -> { failure = "login_required"; retry = 900; }
-                default -> { failure = "unavailable"; retry = 180; }
+                case "411" -> failure = "login_required";
+                default -> failure = "unavailable";
             }
         }
         final String failedState = failure;
@@ -98,8 +98,9 @@ final class ManagedPrices {
                 if (quote == null) {
                     execute(db, """
                             UPDATE price_watches SET state=COALESCE(NULLIF(?,''),state),next_check=?,
+                                last_checked=CASE WHEN ?='' THEN last_checked ELSE ? END,
                                 lease='',lease_until=0 WHERE id=? AND lease=?
-                            """, failedState, observed + delay, watched, batch.lease());
+                            """, failedState, observed + delay, failedState, observed, watched, batch.lease());
                     continue;
                 }
                 prices.observe(db, batch.user(), observed, map("watch_id", watched, "lease", batch.lease(),

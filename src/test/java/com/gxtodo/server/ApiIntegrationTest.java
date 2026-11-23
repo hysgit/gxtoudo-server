@@ -34,6 +34,7 @@ class ApiIntegrationTest {
     @Autowired Database database;
     @Autowired Accounts accounts;
     @Autowired AiData aiData;
+    @Autowired MediaStorage media;
     @Autowired PriceTracker priceTracker;
     @Autowired javax.sql.DataSource source;
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
@@ -145,6 +146,8 @@ class ApiIntegrationTest {
 
         var model = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
         var checked = new java.util.concurrent.atomic.AtomicBoolean();
+        var imageSent = new java.util.concurrent.atomic.AtomicBoolean();
+        String png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lfgAAAAASUVORK5CYII=";
         model.createContext("/v1/chat/completions", exchange -> {
             var request = object(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             var messages = objects(request.get("messages"));
@@ -156,6 +159,10 @@ class ApiIntegrationTest {
                         && "gpt-6-luna".equals(text(request, "model")));
                 answer = map("content", "核对完成");
             } else {
+                if (last.get("content") instanceof List<?>) {
+                    var parts = objects(last.get("content"));
+                    imageSent.set(text(object(parts.get(1).get("image_url")), "url").equals("data:image/png;base64," + png));
+                }
                 answer = map("content", null, "tool_calls", List.of(map("id", "call-1", "type", "function",
                         "function", map("name", "summarize_bills", "arguments", json(scope)))));
             }
@@ -169,12 +176,17 @@ class ApiIntegrationTest {
         var env = new org.springframework.mock.env.MockEnvironment()
                 .withProperty("GXTODO_AI_URL", "http://127.0.0.1:" + model.getAddress().getPort() + "/v1")
                 .withProperty("GXTODO_AI_KEY_FILE", key.toString());
-        var assistant = new AiAssistant(database, aiData, env);
+        var assistant = new AiAssistant(database, aiData, media, env);
         try {
             var prompt = map("thread", "ai-test-thread", "request_id", "ai-test-turn", "question", "核对本月支出", "timezone", "Asia/Shanghai");
             long otherId = id(other, "user_id");
-            var first = database.transaction(true, db -> assistant.submit(db, owner, prompt));
-            assertEquals(first, database.transaction(true, db -> assistant.submit(db, owner, prompt)));
+            var withImage = new HashMap<>(prompt);
+            for (String field : List.of("user_id", "login_id", "token")) withImage.put(field, session.get(field));
+            withImage.put("image", png);
+            var first = assistant.submitImage(withImage);
+            assertEquals(first, assistant.submitImage(withImage));
+            assertEquals(png, object(call("/ai/image", session, "GET", "id", first.get("id")).get("data")).get("image"));
+            assertEquals("3", call("/ai/image", other, "GET", "id", first.get("id")).get("status"));
             assertTrue(objects(database.transaction(false, db -> assistant.list(db, otherId, prompt)).get("data")).isEmpty());
             var otherTurn = database.transaction(true, db -> assistant.submit(db, otherId, prompt));
             assertNotEquals(first.get("id"), otherTurn.get("id"));
@@ -192,7 +204,7 @@ class ApiIntegrationTest {
                 assertNotEquals("failed", turn.get("state"), text(turn, "error"));
                 Thread.sleep(250);
             }
-            assertTrue(done && checked.get());
+            assertTrue(done && checked.get() && imageSent.get());
         } finally {
             assistant.close();
             model.stop(0);
@@ -252,19 +264,22 @@ class ApiIntegrationTest {
         assertTrue(objects(call("/price/watch", other, "GET").get("data")).isEmpty());
         var pair = call("/price/collector", session, "PUT");
         String token = text(pair, "collector_token");
-        for (String amount : List.of("199.99", "189.95")) {
+        for (String amount : List.of("199.99", "189.95", "189.9500")) {
             var check = call("/price/collect", null, "POST", "collector_token", token, "watches", List.of(map("id", watch)));
             var lease = object(check.get("data"));
             assertEquals("https://item.jd.com/123456.html", lease.get("url"));
             var recorded = call("/price/observe", null, "POST", "collector_token", token, "watch_id", watch,
                     "lease", lease.get("lease"), "state", "verified", "amount", amount, "details", "测试口径");
             assertEquals("0", recorded.get("status"));
+            var row = objects(call("/price/watch", session, "GET").get("data")).get(0);
+            assertEquals(600, id(row, "next_check") - id(row, "last_checked"));
             database.transaction(true, db -> {
                 Database.execute(db, "UPDATE price_watches SET next_check=0 WHERE id=?", watch);
                 return null;
             });
         }
         var history = objects(call("/price/history", session, "GET", "id", watch).get("data"));
+        assertEquals(2, history.size());
         assertEquals("189.9500", history.get(0).get("amount"));
         assertEquals("199.9900", history.get(0).get("previous"));
         assertTrue(objects(call("/price/history", other, "GET", "id", watch).get("data")).isEmpty());

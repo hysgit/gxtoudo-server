@@ -220,7 +220,13 @@ class Browser:
             "page": page, "session": secrets.token_hex(24), "start": now, "touched": now,
         }
         try:
-            self.open_login(page, platform)
+            # Enter through the cart so the merchant can reuse an existing sign-in.
+            try:
+                page.goto(CART[platform], wait_until="domcontentloaded", timeout=8000)
+            except TimeoutError:
+                pass
+            if urlsplit(page.url).hostname not in LOGIN_HOSTS[platform] and not self.cart_authenticated(page, platform):
+                self.open_login(page, platform)
             return self.frame(self.active)
         except (Error, Rejected):
             self.close()
@@ -278,6 +284,8 @@ class Browser:
                 page.locator(row_selector).first.wait_for(state="visible", timeout=6500)
             except TimeoutError:
                 pass
+            if not self.cart_authenticated(page, platform):
+                raise Rejected("无法确认购物车已登录，请重新登录平台", "411")
             rows = normalize(platform, page.evaluate(CART_ROWS))
         finally:
             try:
@@ -285,6 +293,15 @@ class Browser:
             finally:
                 lock.close()
         return rows
+
+    @staticmethod
+    def cart_authenticated(page, platform):
+        if urlsplit(page.url).hostname != urlsplit(CART[platform]).hostname:
+            return False
+        if platform != "taobao":
+            return not page.locator('a[href*="passport.jd.com/new/login"]').first.is_visible()
+        cookie_names = {cookie["name"] for cookie in page.context.cookies([CART[platform]]) if cookie["value"]}
+        return {"unb", "cookie2"} <= cookie_names and not page.locator(".mini-login").first.is_visible()
 
     def cart_list(self, owner, platform):
         rows = self.read_cart(owner, platform)

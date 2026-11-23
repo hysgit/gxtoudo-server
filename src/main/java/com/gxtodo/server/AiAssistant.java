@@ -28,6 +28,7 @@ final class AiAssistant {
             Pattern.CASE_INSENSITIVE);
     private final Database storage;
     private final AiData data;
+    private final MediaStorage media;
     private final URI endpoint;
     private final String key, model, effort;
     private final boolean workerEnabled;
@@ -35,9 +36,10 @@ final class AiAssistant {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private Future<?> running;
 
-    AiAssistant(Database storage, AiData data, Environment env) {
+    AiAssistant(Database storage, AiData data, MediaStorage media, Environment env) {
         this.storage = storage;
         this.data = data;
+        this.media = media;
         String url = env.getProperty("GXTODO_AI_URL", "").strip().replaceFirst("/+$", "");
         endpoint = url.isEmpty() ? null : URI.create(url + "/chat/completions");
         model = env.getProperty("GXTODO_AI_MODEL", "gpt-6-luna");
@@ -63,8 +65,8 @@ final class AiAssistant {
                         ) first_turn ORDER BY id DESC LIMIT 50
                         """, user)
                 : query(db, """
-                        SELECT id,question,state,answer,refs,error,created_at FROM (
-                            SELECT id,question,state,answer,refs,error,created_at FROM ai_turns
+                        SELECT id,question,state,answer,refs,error,created_at,image_key<>'' AS has_image FROM (
+                            SELECT id,question,state,answer,refs,error,created_at,image_key FROM ai_turns
                             WHERE user_id=? AND thread=? ORDER BY id DESC LIMIT 50
                         ) recent ORDER BY id
                         """, user, identifier(thread));
@@ -72,20 +74,74 @@ final class AiAssistant {
     }
 
     Map<String, Object> submit(Connection db, long user, Map<String, Object> params) throws SQLException {
+        return map("id", enqueue(db, user, params, "").id());
+    }
+
+    Map<String, Object> submitImage(Map<String, Object> params) {
+        if (!configured()) throw new ApiException(1, "服务端还没有配置 AI 模型");
+        long user = storage.transaction(false, db -> id(Accounts.authenticate(db, params), "id"));
+        String request = identifier(params.get("request_id"));
+        var previous = storage.transaction(false, db -> one(db,
+                "SELECT id FROM ai_turns WHERE user_id=? AND request_id=?", user, request));
+        if (previous != null) return previous;
+        if (!(params.get("image") instanceof String value) || value.length() > MediaStorage.AI_IMAGE_LIMIT / 3 * 4) {
+            throw new ApiException(1, "AI 图片最大为 3 MB");
+        }
+        byte[] bytes;
+        try { bytes = Base64.getDecoder().decode(value); }
+        catch (IllegalArgumentException error) { throw new ApiException(1, "图片数据无效"); }
+        String mime = imageMime(bytes);
+        String object;
+        try { object = media.storeAiImage(user, bytes, mime); }
+        catch (Exception error) { throw new ApiException(1, "图片保存失败，请重试"); }
+
+        try {
+            var saved = storage.transaction(true, db -> {
+                var account = Accounts.authenticate(db, params);
+                return enqueue(db, id(account, "id"), params, object);
+            });
+            if (!saved.created()) media.discardAiImage(object);
+            return map("id", saved.id());
+        } catch (ApiException error) {
+            media.discardAiImage(object);
+            throw error;
+        }
+    }
+
+    Map<String, Object> image(Map<String, Object> params) {
+        String object = storage.transaction(false, db -> {
+            var account = Accounts.authenticate(db, params);
+            var result = one(db, "SELECT image_key FROM ai_turns WHERE id=? AND user_id=? AND image_key<>''",
+                    number(params.get("id"), 1, Long.MAX_VALUE), account.get("id"));
+            if (result == null) throw new ApiException(3, "找不到此对话图片");
+            return text(result, "image_key");
+        });
+        try {
+            byte[] bytes = media.readAiImage(object);
+            return map("data", map("image", Base64.getEncoder().encodeToString(bytes)));
+        } catch (Exception error) {
+            throw new ApiException(1, "图片读取失败，请重试");
+        }
+    }
+
+    private record Submission(long id, boolean created) {}
+
+    private Submission enqueue(Connection db, long user, Map<String, Object> params, String image) throws SQLException {
         if (!configured()) throw new ApiException(1, "服务端还没有配置 AI 模型");
         String thread = identifier(params.get("thread"));
         String request = identifier(params.get("request_id"));
-        String question = string(params.get("question"), 4000, true);
+        String question = string(params.get("question"), 4000, image.isEmpty()).strip();
+        if (question.isEmpty()) question = "请描述这张图片并提取要点。";
         String timezone = string(params.get("timezone"), 128, true);
         try { ZoneId.of(timezone); } catch (DateTimeException error) { throw new ApiException(1, "时区不正确"); }
         var existing = one(db, "SELECT id FROM ai_turns WHERE user_id=? AND request_id=?", user, request);
-        if (existing != null) return existing;
+        if (existing != null) return new Submission(id(existing, "id"), false);
         if (one(db, "SELECT 1 FROM ai_turns WHERE user_id=? AND state IN ('queued','running')", user) != null)
             throw new ApiException(1, "上一条提问仍在处理中");
         long now = Instant.now().getEpochSecond();
-        return map("id", insert(db, """
-                INSERT INTO ai_turns(user_id,thread,request_id,question,timezone,created_at) VALUES(?,?,?,?,?,?)
-                """, user, thread, request, question, timezone, now));
+        return new Submission(insert(db, """
+                INSERT INTO ai_turns(user_id,thread,request_id,question,timezone,created_at,image_key) VALUES(?,?,?,?,?,?,?)
+                """, user, thread, request, question, timezone, now, image), true);
     }
 
     private static String identifier(Object raw) {
@@ -140,6 +196,28 @@ final class AiAssistant {
         AiFailure(String message) { super(message); }
     }
 
+    private static String imageMime(byte[] bytes) {
+        String mime = MediaStorage.detect(Arrays.copyOf(bytes, Math.min(bytes.length, 64)), "image");
+        if (!Set.of("image/jpeg", "image/png", "image/webp", "image/gif").contains(mime)) {
+            throw new ApiException(1, "请选择 JPEG、PNG、WebP 或 GIF 图片");
+        }
+        return mime;
+    }
+
+    private Object userContent(Map<String, Object> turn, boolean includeImage) throws Exception {
+        String question = text(turn, "question");
+        String object = text(turn, "image_key");
+        if (!includeImage || object.isEmpty()) return question;
+        try {
+            byte[] bytes = media.readAiImage(object);
+            return List.of(map("type", "text", "text", question),
+                    map("type", "image_url", "image_url",
+                            map("url", "data:" + imageMime(bytes) + ";base64," + Base64.getEncoder().encodeToString(bytes))));
+        } catch (Exception error) {
+            throw new AiFailure("无法读取对话图片，请重试");
+        }
+    }
+
     private Answer answer(Map<String, Object> turn) throws Exception {
         long user = id(turn, "user_id");
         var timezone = ZoneId.of(text(turn, "timezone"));
@@ -155,15 +233,18 @@ final class AiAssistant {
                 用标准 Markdown 和用户的语言回答，避免编造记录、链接、计算结果或外部资料。
                 """.formatted(LocalDate.now(timezone), timezone)));
         var history = storage.transaction(false, db -> query(db, """
-                SELECT question,answer FROM ai_turns WHERE user_id=? AND thread=? AND id<? AND state='done'
+                SELECT question,answer,image_key FROM ai_turns WHERE user_id=? AND thread=? AND id<? AND state='done'
                 ORDER BY id DESC LIMIT 6
                 """, user, turn.get("thread"), turn.get("id")));
         Collections.reverse(history);
+        var previousImage = text(turn, "image_key").isEmpty()
+                ? history.stream().filter(row -> !text(row, "image_key").isEmpty()).reduce((first, last) -> last).orElse(null)
+                : null;
         for (var previous : history) {
-            messages.add(map("role", "user", "content", text(previous, "question")));
+            messages.add(map("role", "user", "content", userContent(previous, previous == previousImage)));
             messages.add(map("role", "assistant", "content", clip(text(previous, "answer"), 3000)));
         }
-        messages.add(map("role", "user", "content", text(turn, "question")));
+        messages.add(map("role", "user", "content", userContent(turn, true)));
         boolean billDetail = BILL_DETAILS.matcher(text(turn, "question")).find();
         var references = new LinkedHashMap<String, Map<String, Object>>();
         int callsMade = 0;

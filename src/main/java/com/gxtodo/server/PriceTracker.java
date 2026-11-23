@@ -16,6 +16,7 @@ import static com.gxtodo.server.Accounts.token;
 
 @Service
 final class PriceTracker {
+    static final long CHECK_INTERVAL = 600;
     private static final Pattern JD = Pattern.compile("/(?:product/)?([0-9]{3,24})\\.html");
     private static final Set<String> TAOBAO = Set.of("item.taobao.com", "detail.tmall.com");
     private static final Set<String> JD_HOSTS = Set.of("item.jd.com", "item.m.jd.com");
@@ -23,6 +24,7 @@ final class PriceTracker {
     Map<String, Object> list(Connection db, long user) throws SQLException {
         var watches = query(db, """
                 SELECT w.id,w.platform,w.url,w.name,w.variant,w.sku_id,w.quantity,w.region,w.state,w.next_check,
+                       COALESCE(NULLIF(w.last_checked,0),p.observed_at,0) AS last_checked,
                        p.amount::text,p.previous::text,p.details,p.observed_at,p.basis
                 FROM price_watches w LEFT JOIN LATERAL (
                     SELECT amount,previous,details,observed_at,basis FROM price_observations
@@ -36,9 +38,11 @@ final class PriceTracker {
 
     Map<String, Object> history(Connection db, long user, long watch) throws SQLException {
         return map("data", query(db, """
-                SELECT p.amount::text,p.previous::text,p.details,p.observed_at,p.basis FROM price_observations p
-                JOIN price_watches w ON w.id=p.watch_id
-                WHERE w.user_id=? AND w.id=? AND NOT w.deleted ORDER BY p.id DESC LIMIT 100
+                SELECT amount::text,previous::text,details,observed_at,basis FROM (
+                    SELECT p.*,lag(p.amount) OVER (PARTITION BY p.basis ORDER BY p.id) AS preceding_amount
+                    FROM price_observations p JOIN price_watches w ON w.id=p.watch_id
+                    WHERE w.user_id=? AND w.id=? AND NOT w.deleted
+                ) series WHERE amount IS DISTINCT FROM preceding_amount ORDER BY id DESC LIMIT 100
                 """, user, watch));
     }
 
@@ -144,6 +148,7 @@ final class PriceTracker {
         String lease = string(params.get("lease"), 128, true);
         var row = one(db, "SELECT * FROM price_watches WHERE id=? AND user_id=? AND NOT deleted", watch, user);
         if (row == null) throw new ApiException(3, "没有此追踪项");
+        if (lease.equals(text(row, "last_observation_lease"))) return map();
         if (one(db, "SELECT id FROM price_observations WHERE watch_id=? AND request_id=?", watch, lease) != null)
             return map();
         if (!lease.equals(text(row, "lease")) || id(row, "lease_until") < now)
@@ -160,13 +165,18 @@ final class PriceTracker {
             var last = one(db, """
                     SELECT amount FROM price_observations WHERE watch_id=? AND basis=? ORDER BY id DESC LIMIT 1
                     """, watch, basis);
-            Object previous = last == null ? null : last.get("amount");
-            execute(db, """
-                    INSERT INTO price_observations(watch_id,request_id,amount,previous,details,observed_at,basis)
-                    VALUES(?,?,?,?,?,?,?)
-                    """, watch, lease, amount, previous, details, now, basis);
+            BigDecimal previous = last == null ? null : (BigDecimal) last.get("amount");
+            if (previous == null || amount.compareTo(previous) != 0) {
+                execute(db, """
+                        INSERT INTO price_observations(watch_id,request_id,amount,previous,details,observed_at,basis)
+                        VALUES(?,?,?,?,?,?,?)
+                        """, watch, lease, amount, previous, details, now, basis);
+            }
         }
-        execute(db, "UPDATE price_watches SET state=?,next_check=?,lease='',lease_until=0 WHERE id=?", state, now + 1800, watch);
+        execute(db, """
+                UPDATE price_watches SET state=?,next_check=?,last_checked=?,last_observation_lease=?,lease='',lease_until=0
+                WHERE id=?
+                """, state, now + CHECK_INTERVAL, now, lease, watch);
         return map();
     }
 }
